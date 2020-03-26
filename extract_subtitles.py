@@ -74,6 +74,11 @@ def printAttributes(fmt = lambda k, v: f"[{titleCased(snakeSplit(k))}] {v}", sep
   entries = [fmt(k, v) for (k, v) in kwargs.items()]
   print(sep.join(entries))
 
+class Reducer:
+  def __init__(self): pass
+  def accept(self, value): pass
+  def finish(self): pass
+
 # == OpenCV utils ==
 def cv2NormalWin(title):
   cv2.namedWindow(title, cv2.WINDOW_NORMAL)
@@ -98,7 +103,11 @@ class Rect:
 
 # == App ==
 DEBUG = False
+USE_FEATURE = set([])
+FEAT_PROGRESS = "--use-progress"
 NOT_COMMON_PUNTUATION = "#$%&\\()*+-/:;<=>@[]^_`{|}" + "—»™€°"
+
+feat = USE_FEATURE.__contains__
 
 class Frame:
   ''' Class to hold information about each frame '''
@@ -122,6 +131,9 @@ def smooth(a, window_size, window = "hanning") -> array:
   y = np.convolve(w / w.sum(), s, mode="same")
   return y[window_size -1 : -window_size +1]
 
+def relativeChange(a: float, b: float) -> float:
+  return (b - a) / max(a, b)
+
 def stripAll(symbols, text) -> str:
   return text.translate({ord(c):"" for c in symbols})
 
@@ -138,7 +150,17 @@ class BasicCvProcess:
   def frameFilepath(self, it: Frame) -> str:
     return str(self.path_frames/f"frame_{it.no}.jpg")
 
-def relativeChange(a: float, b: float) -> float: return (b - a) / max(a, b)
+class AsProgress(Reducer):
+  def __init__(self, cap: cv2.VideoCapture, crop):
+    n_frame = int(cv2VideoProps(cap)[0])
+    self.progress = ProgressBar(maxval=n_frame).start()
+  def accept(self, index):
+    self.progress.update(index)
+  def finish(self):
+    self.progress.finish()
+
+class AsNoOp(Reducer):
+  def __init__(self, *args): pass
 
 class ExtractSubtitles(BasicCvProcess):
   WIN_LAST_IMAGE = "Last Image"
@@ -168,21 +190,20 @@ class ExtractSubtitles(BasicCvProcess):
       return croped_img
     else: return mat
 
-  def cvtUMatColor(self, mat: cv2.UMat) -> cv2.UMat:
-    return mat # cv2.cvtColor(mat, cv2.COLOR_BGR2LUV)
+  def postprocessUMat(self, mat: cv2.UMat) -> cv2.UMat:
+    return mat #cv2.cvtColor(mat, cv2.COLOR_BGR2LUV)
 
-  def solveFrameDifferences(self, cap: cv2.VideoCapture, crop: Rect) -> Frame:
-    index = 0
-    prev_frame, curr_frame = None, None
-    postprocess = lambda mat: self.cvtUMatColor(self.cropUMat(mat, crop))
-
-    unfinished, img = cap.read()
-    prev_frame = postprocess(img) #< initial (prev == curr)
+  def solveFrameDifferences(self, cap: cv2.VideoCapture, crop: Rect, fold) -> Frame:
+    postprocess = lambda mat: self.postprocessUMat(self.cropUMat(mat, crop))
     if self.is_crop_debug:
       cv2NormalWin(ExtractSubtitles.WIN_LAST_IMAGE)
       cv2NormalWin(ExtractSubtitles.WIN_LAST_FRAME)
-    (n_frame, _, _, _) = cv2VideoProps(cap)
-    progress = ProgressBar(maxval=n_frame).start()
+    reducer = fold(cap, crop)
+
+    index = 0
+    prev_frame, curr_frame = None, None
+    unfinished, img = cap.read()
+    prev_frame = postprocess(img) #< initial (prev == curr)
     while unfinished:
       curr_frame = postprocess(img)
       if self.is_crop_debug:
@@ -196,8 +217,8 @@ class ExtractSubtitles(BasicCvProcess):
       prev_frame = curr_frame
       unfinished, img = cap.read()
       index = index + 1
-      progress.update(index)
-    progress.finish()
+      reducer.accept(index)
+    reducer.finish()
 
   def writeFramesThresholded(self, frames):
     for (a, b) in zipWithNext(frames):
@@ -206,10 +227,13 @@ class ExtractSubtitles(BasicCvProcess):
       if DEBUG: print(f"[{b.no}] prev: {a.value}, curr: {b.value}", file=stderr)
       cv2.imwrite(self.frameFilepath(a), a.img)
 
-  def recognizeText(self, path) -> str:
-    img = cv2.imread(path)
-    return image_to_string(img, self.lang)
-  
+  def recognizeText(self, frame: Frame) -> str:
+    #path = self.frameFilepath(frame)
+    #cv2.imwrite(path, frame.img)
+    #img = cv2.imread(path)
+    #remove(path) #< Delete recognized frame images
+    return image_to_string(frame.img, self.lang)
+
   def onFrameList(self, frames):
     if self.diff_thres != None: self.writeFramesThresholded(frames)
 
@@ -223,10 +247,7 @@ class ExtractSubtitles(BasicCvProcess):
     output_lose_subtitle = (self.path_frames/"loser.txt").open("a+")
     last_subtitle = ""
     for frame in map(frame_list.__getitem__, frame_indices):
-      path = self.frameFilepath(frame)
-      cv2.imwrite(path, frame.img)
-      subtitle = self.recognizeText(path)
-      remove(path) #< Delete recognized frame images
+      subtitle = self.recognizeText(frame)
       if self.subtitleShouldReplace(last_subtitle, subtitle): #< check for repeated subtitles 
         last_subtitle = subtitle #v also clean-up new subtitle
         on_new_subtitle(frame.no, self.postprocessSubtitle(subtitle))
@@ -249,7 +270,7 @@ class ExtractSubtitles(BasicCvProcess):
     cap: video input
     crop: Rect area for lyric graphics
     '''
-    frames = self.solveFrameDifferences(cap, crop)
+    frames = self.solveFrameDifferences(cap, crop, AsProgress if feat(FEAT_PROGRESS) else AsNoOp)
     processChunk = lambda it: self.ocrWithLocalMaxima(it, on_new_subtitle)
     diff_array_parts = map(processChunk, chunked(self.chunk_size, frames))
     diff_array = reduce(lambda a, b: concatenate(array([a, b])), diff_array_parts)
@@ -263,28 +284,33 @@ class ExtractSubtitles(BasicCvProcess):
     plot.savefig(self.path_frames/"plot.png")
 
 # == Main ==
-app = ArgumentParser(
-  prog="extract_subtitles",
-  description="Extract subtitles using OpenCV / Tesseract OCR with frame difference algorithm")
+def makeArgumentParser():
+  app = ArgumentParser(
+    prog="extract_subtitles",
+    description="Extract subtitles using OpenCV / Tesseract OCR with frame difference algorithm")
 
-apg = app.add_argument_group("basic workflow")
-apg.add_argument("video", type=FileType("r"), help="source file to extract from")
-apg.add_argument("-crop", metavar="(x,y)(w,h)",
-  type=PatternType("\((\d+),(\d+)\)", toMapper(int)),
-  default=None, help="crop out subtitles area, improve recognition accuracy")
-apg.add_argument("-thres", metavar="x.x", type=float, default=None, help="fixed threshold value")
-apg.add_argument("-lang", type=str, default="eng", help="OCR language for Tesseract `tesseract --list-langs`")
+  apg = app.add_argument_group("basic workflow")
+  apg.add_argument("video", type=FileType("r"), help="source file to extract from")
+  apg.add_argument("-crop", metavar="(x,y)(w,h)",
+    type=PatternType("\((\d+),(\d+)\)", toMapper(int)),
+    default=None, help="crop out subtitles area, improve recognition accuracy")
+  apg.add_argument("-thres", metavar="x.x", type=float, default=None, help="add frame store for fixed threshold value")
+  apg.add_argument("-lang", type=str, default="eng", help="OCR language for Tesseract `tesseract --list-langs`")
 
-apg1 = app.add_argument_group("misc settings")
-apg1.add_argument("--crop-debug", action="store_true", help="show OpenCV GUI when processing")
-apg1.add_argument("--draw-plot", action="store_true", help="draw difference plot for statics")
-BasicCvProcess.registerArguments(apg1)
+  apg1 = app.add_argument_group("misc settings")
+  apg1.add_argument("--crop-debug", action="store_true", help="show OpenCV GUI when processing")
+  apg1.add_argument("--draw-plot", action="store_true", help="draw difference plot for statics")
+  apg1.add_argument(FEAT_PROGRESS, action="store_true", help="show progress bar")
+  apg1.add_argument("--debug", action="store_true", help="print debug info")
+  BasicCvProcess.registerArguments(apg1)
+  return app
 
 def mkdirIfNotExists(self: Path):
   if not self.exists(): self.mkdir()
 
 if __name__ == "__main__":
-  cfg = app.parse_args()
+  app = makeArgumentParser()
+  cfg = app.parse_args() #v then assign config
   video_path = cfg.video.name
   lang, crop, crop_debug, thres, window, window_size, chunk_size, frames_dir = cfg.lang, cfg.crop, cfg.crop_debug, cfg.thres, cfg.window, cfg.window_size, cfg.chunk_size, cfg.frames_dir
   printAttributes(
@@ -296,12 +322,15 @@ if __name__ == "__main__":
     filter_window_size=window_size,
     process_chunk_size=chunk_size,
     frame_directory=frames_dir
-  )
+  ) #v extra config
+  if cfg.use_progress: USE_FEATURE.add(FEAT_PROGRESS)
+  if cfg.debug: DEBUG = True
   print("Extracting key frames...")
   capture = cv2.VideoCapture(video_path)
-  cap_props = cv2VideoProps(capture)
-  printAttributes(video_props=cap_props)
-  extractor = ExtractSubtitles(lang, crop_debug, thres, window, window_size, chunk_size, also(mkdirIfNotExists, Path(frames_dir)))
+  printAttributes(video_props=cv2VideoProps(capture))
+
+  extractor = ExtractSubtitles(lang, crop_debug, thres,
+    window, window_size, chunk_size, also(mkdirIfNotExists, Path(frames_dir)) )
   diff_array = extractor.runOn(capture, let(lambda it: Rect(*it[0], *it[1]), crop))
   capture.release()
   if cfg.draw_plot: extractor.drawPlot(diff_array)
