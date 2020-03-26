@@ -18,6 +18,8 @@ This project is used to extract subtitles from the video. First, the key frames 
 
 ### Run
 
+Install missing dependences first using `pip install -r requirements.txt`
+
 ```
 λ python extract_subtitles.py <videopath> <Paremeter to select how many frames you want>
 ```
