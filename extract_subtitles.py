@@ -5,6 +5,7 @@ from argparse import ArgumentParser, FileType
 from re import findall
 from pathlib import Path
 from os import remove
+from sys import stderr
 from progressbar import ProgressBar
 from itertools import chain, islice
 from functools import reduce
@@ -85,10 +86,29 @@ def cv2VideoProps(cap: cv2.VideoCapture) -> (int, int, int, int):
   props = (CAP_PROP_FRAME_COUNT, CAP_PROP_FPS, CAP_PROP_FRAME_WIDTH, CAP_PROP_FRAME_HEIGHT)
   return tuple(map(int, map(cap.get, props)))
 
+class Rect:
+  def __init__(self, x,y, w,h):
+    ''' (pad_left, pad_top, width, height) '''
+    self.xywh = (x,y, w,h)
+    self.form_range = (y,y+h, x,x+w)
+  def sliceUMat(self, mat: cv2.UMat) -> cv2.UMat:
+    (y, y_end, x, x_end) = self.form_range
+    return mat[y:y_end, x:x_end]
+
+# == App ==
+DEBUG = False
+
+class Frame:
+  ''' Class to hold information about each frame '''
+  def __init__(self, no, img, value):
+    self.no, self.img, self.value = no, img, value
+  def __eq__(self, other): return self.no == other.no
+  def __hash__(self): return hash(self.no)
+
 smooth_supported_windows = ["flat", "hanning", "hamming", "bartlett", "blackman"]
 def smooth(a, window_size, window = "hanning") -> array:
   supported_windows = smooth_supported_windows
-  print(f"smooth [...x{len(a)}], {window_size} {window}")
+  if DEBUG: print(f"smooth [...x{len(a)}], {window_size} {window}")
   if window_size < 3: return a
   require(a.ndim == 1, "smooth only accepts 1 dimension arrays")
   require(a.size >= window_size, "input vector size must >= window size")
@@ -100,23 +120,6 @@ def smooth(a, window_size, window = "hanning") -> array:
   w = getattr(np, window)(window_size) if window != "flat" else np.ones(window_size, "d")
   y = np.convolve(w / w.sum(), s, mode="same")
   return y[window_size -1 : -window_size +1]
-
-class Rect:
-  def __init__(self, x,y, w,h):
-    ''' (pad_left, pad_top, width, height) '''
-    self.xywh = (x,y, w,h)
-    self.form_range = (y,y+h, x,x+w)
-  def sliceUMat(self, mat: cv2.UMat) -> cv2.UMat:
-    (y, y_end, x, x_end) = self.form_range
-    return mat[y:y_end, x:x_end]
-
-# == App ==
-class Frame:
-  ''' Class to hold information about each frame '''
-  def __init__(self, no, img, value):
-    self.no, self.img, self.value = no, img, value
-  def __eq__(self, other): return self.no == other.no
-  def __hash__(self): return hash(self.no)
 
 class ExtractSubtitles:
   WIN_LAST_FRAME = "Last Frame"
@@ -133,9 +136,9 @@ class ExtractSubtitles:
     require(path_frames.is_dir(), f"{path_frames} must be dir")
     self.lang, self.is_crop_debug = lang, is_crop_debug
     self.diff_thres, self.window_size, self.window, self.chunk_size, self.path_frames = diff_thres, window_size, window, chunk_size, path_frames
-  def inFramesDir(self, name) -> str:
-    return str(self.path_frames/name)
-  def frameFilename(self, it: Frame) -> str: return f"frame_{it.no}.jpg"
+
+  def frameFilepath(self, it: Frame) -> str:
+    return str(self.path_frames/f"frame_{it.no}.jpg")
 
   @staticmethod
   def relativeChange(a: float, b: float) -> float: return (b - a) / max(a, b)
@@ -172,12 +175,11 @@ class ExtractSubtitles:
     for (a, b) in zipWithNext(frames):
       vb = np.float(b.value if b.value != 0 else 1) #< what if no motion between (last-1)&last ?
       if ExtractSubtitles.relativeChange(np.float(a.value), vb) < self.diff_thres: continue
-      if self.is_crop_debug: print(f"[{b.no}] prev: {a.value}, curr: {b.value}", file=stderr)
-      name = self.frameFilename(a)
-      cv2.imwrite(self.inFramesDir(name), a.img)
+      if DEBUG: print(f"[{b.no}] prev: {a.value}, curr: {b.value}", file=stderr)
+      cv2.imwrite(self.frameFilepath(a), a.img)
 
-  def recognizeText(self, name: str, crop: Rect) -> str:
-    img = cv2.imread(self.inFramesDir(name))
+  def recognizeText(self, path, crop: Rect) -> str:
+    img = cv2.imread(path)
     if crop != None:
       croped_img = crop.sliceUMat(img)
       if self.is_crop_debug:
@@ -196,23 +198,24 @@ class ExtractSubtitles:
     frame_indices = np.subtract(np.asarray(argrelextrema(sm_diff_array, np.greater))[0], 1)
     last_subtitle = ""
     for frame in map(frame_itselfs.__getitem__, frame_indices):
-      name = self.frameFilename(frame)
-      cv2.imwrite(self.inFramesDir(name), frame.img)
-      subtitle = self.recognizeText(name, crop)
-      if self.subtitleOlderThan(subtitle, last_subtitle):
+      path = self.frameFilepath(frame)
+      cv2.imwrite(path, frame.img)
+      subtitle = self.recognizeText(path, crop)
+      if self.subtitleShouldReplace(last_subtitle, subtitle):
         last_subtitle = subtitle #< Check for repeated subtitles 
         on_new_subtitle(frame.no, subtitle)
-      remove(self.inFramesDir(name)) #< Delete recognized frame images
+      remove(path) #< Delete recognized frame images
     return sm_diff_array
 
-  def subtitleOlderThan(self, a, b) -> bool:
-    return b != a
+  def subtitleShouldReplace(self, a, b) -> bool:
+    fmtQuality = lambda s: s.strip().count(" ") + len(set(s))
+    return b != a and b.count("\n") == 0 and fmtQuality(b) > fmtQuality(a)
 
   def drawPlot(self, diff_array):
     plot.figure(figsize=(40, 20))
     plot.locator_params(100)
     plot.stem(diff_array, use_line_collection=True)
-    plot.savefig(self.inFramesDir("plot.png"))
+    plot.savefig(self.path_frames/"plot.png")
 
   def runOn(self, cap: cv2.VideoCapture, crop: Rect) -> array:
     '''
