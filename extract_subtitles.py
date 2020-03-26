@@ -6,11 +6,13 @@ from re import findall
 from pathlib import Path
 from os import remove
 from progressbar import ProgressBar
+from itertools import chain, islice
+from functools import reduce
 
 import cv2
 from cv2 import CAP_PROP_FRAME_COUNT, CAP_PROP_FPS, CAP_PROP_FRAME_WIDTH, CAP_PROP_FRAME_HEIGHT
 import numpy as np
-from numpy import array, convolve
+from numpy import array, convolve, concatenate
 from scipy.signal import argrelextrema
 from pytesseract import image_to_string
 
@@ -47,6 +49,21 @@ def zipWithNext(xs: list):
   for i in range(1, len(xs)):
     yield (xs[i-1], xs[i])
 
+def chunked(n, xs):
+  while True:
+    try: #< must return when inner gen finished
+      first = next(xs)
+    except StopIteration: return
+    chunk = islice(xs, n)
+    yield chain((first,) , chunk)
+
+def collect2(selector2, xs):
+  bs, cs = [], []
+  for x in xs:
+    b, c = selector2(x)
+    bs.append(b); cs.append(c)
+  return (bs, cs)
+
 def snakeSplit(text): return text.strip().split("_")
 def getFuncName(func): return findall("^<.*function (\S+)", repr(func))[0]
 def titleCased(texts, sep = " "): return sep.join(map(str.capitalize, texts))
@@ -54,16 +71,6 @@ def titleCased(texts, sep = " "): return sep.join(map(str.capitalize, texts))
 def printAttributes(fmt = lambda k, v: f"[{titleCased(snakeSplit(k))}] {v}", sep = "\n", **kwargs):
   entries = [fmt(k, v) for (k, v) in kwargs.items()]
   print(sep.join(entries))
-
-printedCall_fmt = lambda op, args: f"{getFuncName(op)} {' '.join(map(str, args))}"
-printedCall_on_result = lambda r: print("" if r == None else f" -> {r}")
-def printedCall(op, fmt = printedCall_fmt, on_result = printedCall_on_result):
-  def _invoke(*args, **kwargs):
-    print(fmt(op, args), end="")
-    res = op(*args, **kwargs)
-    on_result(res)
-    return res
-  return _invoke
 
 # == OpenCV utils ==
 def cv2NormalWin(title):
@@ -78,8 +85,9 @@ def cv2VideoProps(cap: cv2.VideoCapture) -> (int, int, int, int):
   props = (CAP_PROP_FRAME_COUNT, CAP_PROP_FPS, CAP_PROP_FRAME_WIDTH, CAP_PROP_FRAME_HEIGHT)
   return tuple(map(int, map(cap.get, props)))
 
+smooth_supported_windows = ["flat", "hanning", "hamming", "bartlett", "blackman"]
 def smooth(a, window_size, window = "hanning") -> array:
-  supported_windows = ["flat", "hanning", "hamming", "bartlett", "blackman"]
+  supported_windows = smooth_supported_windows
   print(f"smooth [...x{len(a)}], {window_size} {window}")
   if window_size < 3: return a
   require(a.ndim == 1, "smooth only accepts 1 dimension arrays")
@@ -111,10 +119,10 @@ class Frame:
   def __hash__(self): return hash(self.no)
 
 class ExtractSubtitles:
-  WIN_SUBTITLE_RECT = "Subtitle Rect"
   WIN_LAST_FRAME = "Last Frame"
+  WIN_SUBTITLE_RECT = "Subtitle Rect"
 
-  def __init__(self, lang: str, is_crop_debug: bool, diff_thres: float, window_size: int, path_frames: Path):
+  def __init__(self, lang: str, is_crop_debug: bool, diff_thres: float, window_size: int, window: str, chunk_size: int, path_frames: Path):
     '''
     lang: language for Tesseract OCR
     is_crop_debug: show OpenCV capture GUI when processing
@@ -124,29 +132,18 @@ class ExtractSubtitles:
     '''
     require(path_frames.is_dir(), f"{path_frames} must be dir")
     self.lang, self.is_crop_debug = lang, is_crop_debug
-    self.diff_thres, self.window_size, self.path_frames = diff_thres, window_size, path_frames
+    self.diff_thres, self.window_size, self.window, self.chunk_size, self.path_frames = diff_thres, window_size, window, chunk_size, path_frames
   def inFramesDir(self, name) -> str:
     return str(self.path_frames/name)
-  def filename_frame(self, it): return f"frame_{it.no}.jpg"
+  def frameFilename(self, it: Frame) -> str: return f"frame_{it.no}.jpg"
 
-  def recognizeText(self, name: str, crop: Rect) -> str:
-    img = cv2.imread(self.inFramesDir(name))
-    if crop != None:
-      croped_img = crop.sliceUMat(img)
-      if self.is_crop_debug:
-        cv2.imshow(ExtractSubtitles.WIN_SUBTITLE_RECT, croped_img)
-        cv2WaitKey(' ')
-      return image_to_string(croped_img, self.lang)
-    else:
-      return image_to_string(img, self.lang)
-
-  @printedCall
   @staticmethod
   def relativeChange(a: float, b: float) -> float: return (b - a) / max(a, b)
 
-  def solveFrameDifferences(self, cap: cv2.VideoCapture, on_frame = noOp) -> (list, list):
-    frames, frame_diffs = [], []
+  def cvtColor(self, mat: cv2.UMat) -> cv2.UMat:
+    return cv2.cvtColor(mat, cv2.COLOR_BGR2LUV)
 
+  def solveFrameDifferences(self, cap: cv2.VideoCapture, on_frame = noOp) -> Frame:
     index = 0
     prev_frame, curr_frame = None, None
 
@@ -160,64 +157,73 @@ class ExtractSubtitles:
       if curr_frame is not None: # and prev_frame is not None
         diff = cv2.absdiff(curr_frame, prev_frame) #< main logic goes here
         count = np.sum(diff)
-        frame_diffs.append(count)
-        frame = Frame(index, img, count)
-        frames.append(frame)
+        yield Frame(index, img, count)
       on_frame(curr_frame)
       prev_frame = curr_frame
+      unfinished, img = cap.read()
       index = index + 1
       progress.update(index)
-      unfinished, img = cap.read()
       if self.is_crop_debug:
         cv2.imshow(ExtractSubtitles.WIN_LAST_FRAME, prev_frame) #< must have single name, to animate
         if cv2WaitKey('q'): break
     progress.finish()
-    return (frames, frame_diffs)
-
-  def cvtColor(self, mat: cv2.UMat) -> cv2.UMat:
-    return cv2.cvtColor(mat, cv2.COLOR_BGR2LUV)
 
   def writeFramesThreshold(self, frames):
     for (a, b) in zipWithNext(frames):
-      if relativeChange(np.float(a.value), np.float(b.value)) < self.diff_thres: continue
-      print(f"[{b.no}] prev: {a.value}, curr: {b.value}")
-      name = self.filename_frame(frames[i])
-      cv2.imwrite(self.inFramesDir(name), frames[i].img)
+      vb = np.float(b.value if b.value != 0 else 1) #< what if no motion between (last-1)&last ?
+      if ExtractSubtitles.relativeChange(np.float(a.value), vb) < self.diff_thres: continue
+      if self.is_crop_debug: print(f"[{b.no}] prev: {a.value}, curr: {b.value}", file=stderr)
+      name = self.frameFilename(a)
+      cv2.imwrite(self.inFramesDir(name), a.img)
 
-  def ocrWithLocalMaxima(self, frames, frame_diffs, crop, on_new_subtitle = print) -> np.array:
+  def recognizeText(self, name: str, crop: Rect) -> str:
+    img = cv2.imread(self.inFramesDir(name))
+    if crop != None:
+      croped_img = crop.sliceUMat(img)
+      if self.is_crop_debug:
+        cv2.imshow(ExtractSubtitles.WIN_SUBTITLE_RECT, croped_img)
+        cv2WaitKey(' ')
+      return image_to_string(croped_img, self.lang)
+    else:
+      return image_to_string(img, self.lang)
+
+  def ocrWithLocalMaxima(self, frames, crop, on_new_subtitle = print) -> array:
+    ''' chunked processing using window, reducing memory usage '''
+    frame_itselfs, frame_diffs = collect2(lambda it: (it, it.value), frames)
+    if self.diff_thres != None: self.writeFramesThreshold(frame_itselfs)
     diff_array = np.array(frame_diffs)
-    sm_diff_array = smooth(diff_array, self.window_size)
+    sm_diff_array = smooth(diff_array, self.window_size, self.window)
     frame_indices = np.subtract(np.asarray(argrelextrema(sm_diff_array, np.greater))[0], 1)
     last_subtitle = ""
-    for frame in map(frames.__getitem__, frame_indices):
-      name = self.filename_frame(frame)
+    for frame in map(frame_itselfs.__getitem__, frame_indices):
+      name = self.frameFilename(frame)
       cv2.imwrite(self.inFramesDir(name), frame.img)
       subtitle = self.recognizeText(name, crop)
-      if not self.subtitleEquals(subtitle, last_subtitle):
+      if self.subtitleOlderThan(subtitle, last_subtitle):
         last_subtitle = subtitle #< Check for repeated subtitles 
         on_new_subtitle(frame.no, subtitle)
       remove(self.inFramesDir(name)) #< Delete recognized frame images
     return sm_diff_array
 
-  def subtitleEquals(self, a, b) -> bool:
-    return a == b
+  def subtitleOlderThan(self, a, b) -> bool:
+    return b != a
 
-  @staticmethod
-  def drawPlot(diff_array):
+  def drawPlot(self, diff_array):
     plot.figure(figsize=(40, 20))
-    plot.locator_params(numticks=100)
+    plot.locator_params(100)
     plot.stem(diff_array, use_line_collection=True)
     plot.savefig(self.inFramesDir("plot.png"))
 
-  def runOn(self, cap: cv2.VideoCapture, crop: Rect):
+  def runOn(self, cap: cv2.VideoCapture, crop: Rect) -> array:
     '''
     cap: video input
     crop: Rect area for lyric graphics
     '''
-    (frames, frame_diffs) = self.solveFrameDifferences(cap)
+    frames = self.solveFrameDifferences(cap)
+    diff_array_parts = map(lambda bucket: self.ocrWithLocalMaxima(bucket, crop), chunked(self.chunk_size, frames))
+    diff_array = reduce(lambda a, b: concatenate(array([a, b])), diff_array_parts)
     cv2.destroyAllWindows()
-    if self.diff_thres != None: writeFramesThreshold(frames)
-    return self.ocrWithLocalMaxima(frames, frame_diffs, crop)
+    return diff_array
 
 
 # == Main ==
@@ -236,7 +242,9 @@ apg.add_argument("-lang", type=str, default="chi_sim", help="OCR language for te
 apg1 = app.add_argument_group("misc settings")
 apg1.add_argument("--crop-debug", action="store_true", help="show OpenCV GUI when processing")
 apg1.add_argument("--draw-plot", action="store_true", help="draw plot for statics")
+apg1.add_argument("--window", type=str, default="hamming", help=f"filter window, one of {smooth_supported_windows}")
 apg1.add_argument("--window-size", type=int, default=13, help="smoothing window size")
+apg1.add_argument("--chunk-size", type=int, default=200, help="processing frame chunk size")
 apg1.add_argument("--frames-dir", type=Path, default=Path("frames/"), help="directory to store the processed frames")
 
 def mkdirIfNotExists(self: Path):
@@ -245,20 +253,21 @@ def mkdirIfNotExists(self: Path):
 if __name__ == "__main__":
   cfg = app.parse_args()
   video_path = cfg.video.name
-  lang, crop, crop_debug, thres, window_size, frames_dir = cfg.lang, cfg.crop, cfg.crop_debug, cfg.thres, cfg.window_size, cfg.frames_dir
+  lang, crop, crop_debug, thres, window_size, window, chunk_size, frames_dir = cfg.lang, cfg.crop, cfg.crop_debug, cfg.thres, cfg.window_size, cfg.window, cfg.chunk_size, cfg.frames_dir
   printAttributes(
     video_path=video_path,
     crop=crop,
     threshold=thres,
     subtitle_language=lang,
     frame_directory=frames_dir,
-    filter_window_size=window_size
+    filter_window_size=window_size,
+    filter_window=window
   )
   print("Extracting key frames...")
   capture = cv2.VideoCapture(video_path)
   cap_props = cv2VideoProps(capture)
   printAttributes(video_props=cap_props)
-  extractor = ExtractSubtitles(lang, crop_debug, thres, window_size, also(mkdirIfNotExists, Path(frames_dir)))
+  extractor = ExtractSubtitles(lang, crop_debug, thres, window_size, window, chunk_size, also(mkdirIfNotExists, Path(frames_dir)))
   diff_array = extractor.runOn(capture, Rect(*crop[0], *crop[1]))
   capture.release()
-  if cfg.draw_plot: ExtractSubtitles.drawPlot(diff_array)
+  if cfg.draw_plot: extractor.drawPlot(diff_array)
