@@ -11,6 +11,7 @@ from itertools import chain, islice
 from functools import reduce
 
 import cv2
+from cv2 import UMat, VideoCapture
 from cv2 import CAP_PROP_FRAME_COUNT, CAP_PROP_FPS, CAP_PROP_FRAME_WIDTH, CAP_PROP_FRAME_HEIGHT
 import numpy as np
 from numpy import array, convolve, concatenate
@@ -97,7 +98,7 @@ class Rect:
     ''' (pad_left, pad_top, width, height) '''
     self.xywh = (x,y, w,h)
     self.form_range = (y,y+h, x,x+w)
-  def sliceUMat(self, mat: cv2.UMat) -> cv2.UMat:
+  def sliceUMat(self, mat: UMat) -> UMat:
     (y, y_end, x, x_end) = self.form_range
     return mat[y:y_end, x:x_end]
 
@@ -151,7 +152,7 @@ class BasicCvProcess:
     return str(self.path_frames/f"frame_{it.no}.jpg")
 
 class AsProgress(Reducer):
-  def __init__(self, cap: cv2.VideoCapture, crop):
+  def __init__(self, cap: VideoCapture, crop):
     n_frame = int(cv2VideoProps(cap)[0])
     self.progress = ProgressBar(maxval=n_frame).start()
   def accept(self, index):
@@ -181,7 +182,7 @@ class ExtractSubtitles(BasicCvProcess):
     self.lang, self.is_crop_debug, self.diff_thres = lang, is_crop_debug, diff_thres
     super().__init__(window, window_size, chunk_size, path_frames)
 
-  def cropUMat(self, mat: cv2.UMat, crop: Rect) -> cv2.UMat:
+  def cropUMat(self, mat: UMat, crop: Rect) -> UMat:
     if crop != None:
       croped_img = crop.sliceUMat(mat)
       if self.is_crop_debug:
@@ -190,10 +191,10 @@ class ExtractSubtitles(BasicCvProcess):
       return croped_img
     else: return mat
 
-  def postprocessUMat(self, mat: cv2.UMat) -> cv2.UMat:
+  def postprocessUMat(self, mat: UMat) -> UMat:
     return mat #cv2.cvtColor(mat, cv2.COLOR_BGR2LUV)
 
-  def solveFrameDifferences(self, cap: cv2.VideoCapture, crop: Rect, fold) -> Frame:
+  def solveFrameDifferences(self, cap: VideoCapture, crop: Rect, fold) -> Frame:
     postprocess = lambda mat: self.postprocessUMat(self.cropUMat(mat, crop))
     if self.is_crop_debug:
       cv2NormalWin(ExtractSubtitles.WIN_LAST_IMAGE)
@@ -247,6 +248,8 @@ class ExtractSubtitles(BasicCvProcess):
     output_lose_subtitle = (self.path_frames/"loser.txt").open("a+")
     last_subtitle = ""
     for frame in map(frame_list.__getitem__, frame_indices):
+      cv2.imshow(ExtractSubtitles.WIN_SUBTITLE_RECT, frame.img)
+      cv2WaitKey(' ')
       subtitle = self.recognizeText(frame)
       if self.subtitleShouldReplace(last_subtitle, subtitle): #< check for repeated subtitles 
         last_subtitle = subtitle #v also clean-up new subtitle
@@ -265,7 +268,7 @@ class ExtractSubtitles(BasicCvProcess):
   def postprocessSubtitle(self, text) -> str:
     return stripAll(NOT_COMMON_PUNTUATION, text)
 
-  def runOn(self, cap: cv2.VideoCapture, crop: Rect, on_new_subtitle = print) -> array:
+  def runOn(self, cap: VideoCapture, crop: Rect, on_new_subtitle = print) -> array:
     '''
     cap: video input
     crop: Rect area for lyric graphics
@@ -292,7 +295,7 @@ def makeArgumentParser():
   apg = app.add_argument_group("basic workflow")
   apg.add_argument("video", type=FileType("r"), help="source file to extract from")
   apg.add_argument("-crop", metavar="(x,y)(w,h)",
-    type=PatternType("\((\d+),(\d+)\)", toMapper(int)),
+    type=PatternType(r"\((\d+),(\d+)\)", toMapper(int)),
     default=None, help="crop out subtitles area, improve recognition accuracy")
   apg.add_argument("-thres", metavar="x.x", type=float, default=None, help="add frame store for fixed threshold value")
   apg.add_argument("-lang", type=str, default="eng", help="OCR language for Tesseract `tesseract --list-langs`")
@@ -326,7 +329,7 @@ if __name__ == "__main__":
   if cfg.use_progress: USE_FEATURE.add(FEAT_PROGRESS)
   if cfg.debug: DEBUG = True
   print("Extracting key frames...")
-  capture = cv2.VideoCapture(video_path)
+  capture = VideoCapture(video_path)
   printAttributes(video_props=cv2VideoProps(capture))
 
   extractor = ExtractSubtitles(lang, crop_debug, thres,
