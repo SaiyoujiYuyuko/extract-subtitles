@@ -111,3 +111,5 @@ image_examples/
 video_examples/
 
 frames/
+*.mp4
+*.mkv

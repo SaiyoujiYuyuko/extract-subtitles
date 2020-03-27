@@ -1,126 +1,49 @@
 #!/bin/env python3
 # -*- coding: utf-8 -*-
 
-from argparse import ArgumentParser, FileType
-from re import findall
+from argparse import ArgumentParser, Namespace, FileType
 from pathlib import Path
 from os import remove
-from sys import stderr
-from progressbar import ProgressBar
-from itertools import chain, islice
+from sys import argv, stderr
 from functools import reduce
+from progressbar import ProgressBar
+
+from libs.fun_utils import let, also, require
+from libs.fun_utils import zipWithNext, chunked, collect2
+from libs.fun_utils import PatternType, toMapper, printAttributes
+from libs.fun_utils import Reducer, AsNoOp
+
+from libs.cv_utils import Frame, Rect
+from libs.cv_utils import cv2VideoProps, cv2NormalWin, cv2WaitKey
 
 import cv2
 from cv2 import UMat, VideoCapture
-from cv2 import CAP_PROP_FRAME_COUNT, CAP_PROP_FPS, CAP_PROP_FRAME_WIDTH, CAP_PROP_FRAME_HEIGHT
+from pytesseract import image_to_string
 import numpy as np
 from numpy import array, convolve, concatenate
 from scipy.signal import argrelextrema
-from pytesseract import image_to_string
 from strsimpy.normalized_levenshtein import NormalizedLevenshtein
 
 import matplotlib.pyplot as plot
 
-# == Normal function utils ==
-identity = lambda x: x
-noOp = lambda x: ()
-
-def let(transform, x):
-  return transform(x) if x != None else None
-
-def also(op, x):
-  op(x)
-  return x
-
-def require(p, message):
-  if not p: raise ValueError(message)
-
-class PatternType:
-  def __init__(self, regex, transform = identity):
-    self.regex, self.transform = regex, transform
-  def __repr__(self): return f"PatternType({self.regex})"
-  def __call__(self, text):
-    groups = findall(self.regex, text)
-    return list(map(self.transform, groups))
-
-
-def toMapper(transform):
-  return lambda xs: [transform(x) for x in xs]
-
-def zipWithNext(xs: list):
-  require(len(xs) >= 2, f"len {len(xs)} is too short (< 2)")
-  for i in range(1, len(xs)):
-    yield (xs[i-1], xs[i])
-
-def chunked(n, xs):
-  while True:
-    try: #< must return when inner gen finished
-      first = next(xs)
-    except StopIteration: return
-    chunk = islice(xs, n)
-    yield chain((first,) , chunk)
-
-def collect2(selector2, xs):
-  bs, cs = [], []
-  for x in xs:
-    b, c = selector2(x)
-    bs.append(b); cs.append(c)
-  return (bs, cs)
-
-
-def snakeSplit(text): return text.strip().split("_")
-def titleCased(texts, sep = " "): return sep.join(map(str.capitalize, texts))
-
-def printAttributes(fmt = lambda k, v: f"[{titleCased(snakeSplit(k))}] {v}", sep = "\n", **kwargs):
-  entries = [fmt(k, v) for (k, v) in kwargs.items()]
-  print(sep.join(entries))
-
-class Reducer:
-  def __init__(self): pass
-  def accept(self, value): pass
-  def finish(self): pass
-
-# == OpenCV utils ==
-def cv2NormalWin(title):
-  cv2.namedWindow(title, cv2.WINDOW_NORMAL)
-
-def cv2WaitKey(key_code, delay_ms = 1) -> bool:
-  require(len(key_code) == 1, f"{repr(key_code)} must be single char")
-  return cv2.waitKey(delay_ms) & 0xFF == ord(key_code)
-
-def cv2VideoProps(cap: cv2.VideoCapture) -> (int, int, int, int):
-  ''' (count, fps, width, height) '''
-  props = (CAP_PROP_FRAME_COUNT, CAP_PROP_FPS, CAP_PROP_FRAME_WIDTH, CAP_PROP_FRAME_HEIGHT)
-  return tuple(map(int, map(cap.get, props)))
-
-class Rect:
-  def __init__(self, x,y, w,h):
-    ''' (pad_left, pad_top, width, height) '''
-    self.xywh = (x,y, w,h)
-    self.form_range = (y,y+h, x,x+w)
-  def sliceUMat(self, mat: UMat) -> UMat:
-    (y, y_end, x, x_end) = self.form_range
-    return mat[y:y_end, x:x_end]
-
-# == App ==
-DEBUG = False
+# == App Common Logics ==
 USE_FEATURE = set([])
+FEAT_DEBUG = "--debug"
 FEAT_PROGRESS = "--use-progress"
 NOT_COMMON_PUNTUATION = "#$%&\\()*+-/:;<=>@[]^_`{|}" + "—»™€°"
 
-feat = USE_FEATURE.__contains__
+feats = USE_FEATURE.__contains__
 
-class Frame:
-  ''' Class to hold information about each frame '''
-  def __init__(self, no, img, value):
-    self.no, self.img, self.value = no, img, value
-  def __eq__(self, other): return self.no == other.no
-  def __hash__(self): return hash(self.no)
+def printDebug(*args, **kwargs):
+  if feats(FEAT_DEBUG): print(*args, **kwargs, file=stderr)
+
+def relativeChange(a: float, b: float) -> float:
+  return (b - a) / max(a, b)
 
 smooth_supported_windows = ["flat", "hanning", "hamming", "bartlett", "blackman"]
-def smooth(a, window_size, window = "hanning") -> array:
+def smooth(a: array, window_size: int, window = "hanning") -> array:
   supported_windows = smooth_supported_windows
-  if DEBUG: print(f"smooth [...x{len(a)}], {window_size} {window}")
+  printDebug(f"smooth [...x{len(a)}], {window_size} {window}")
   if window_size < 3: return a
   require(a.ndim == 1, "smooth only accepts 1 dimension arrays")
   require(a.size >= window_size, "input vector size must >= window size")
@@ -132,11 +55,13 @@ def smooth(a, window_size, window = "hanning") -> array:
   y = np.convolve(w / w.sum(), s, mode="same")
   return y[window_size -1 : -window_size +1]
 
-def relativeChange(a: float, b: float) -> float:
-  return (b - a) / max(a, b)
-
 def stripAll(symbols, text) -> str:
   return text.translate({ord(c):"" for c in symbols})
+
+_levenshtein = NormalizedLevenshtein()
+def stringSimilarity(a: str, b: str) -> float:
+  return _levenshtein.distance(a, b)
+
 
 class BasicCvProcess:
   ''' Helper class for simple CV programs (window+size, chunk_size, path_frames) '''
@@ -145,7 +70,7 @@ class BasicCvProcess:
   @staticmethod
   def registerArguments(ap: ArgumentParser):
     ap.add_argument("--window", type=str, default="hamming", help=f"filter window, one of {smooth_supported_windows}")
-    ap.add_argument("--window-size", type=int, default=30, help="smoothing window size")
+    ap.add_argument("--window-size", type=int, default=30, help="matrix filtering window size")
     ap.add_argument("--chunk-size", type=int, default=300, help="processing frame chunk size")
     ap.add_argument("--frames-dir", type=Path, default=Path("frames/"), help="directory to store the processed frames")
   def frameFilepath(self, it: Frame) -> str:
@@ -160,23 +85,26 @@ class AsProgress(Reducer):
   def finish(self):
     self.progress.finish()
 
-class AsNoOp(Reducer):
-  def __init__(self, *args): pass
-
+# == Main Algorithm ==
 class ExtractSubtitles(BasicCvProcess):
+  '''
+  Operation of extracting video subtitle area as text,
+  - configurable: `cropUMat`, `postprocessUMat`, `onFrameList`, `subtitleShouledReplace`, `postpreocessSubtitle`
+  - workflow: `runOn`, `solveFrameDifferences`, `on`, `ocrWithLocalMaxima`
+  '''
   WIN_LAST_IMAGE = "Last Image"
   WIN_LAST_FRAME = "Last Frame (processed image)"
   WIN_SUBTITLE_RECT = "Subtitle Rect"
 
   def __init__(self, lang: str, is_crop_debug: bool, diff_thres: float, window, window_size, chunk_size, path_frames):
     '''
-    lang: language for Tesseract OCR
-    is_crop_debug: show OpenCV capture GUI when processing
-    diff_thres: threshold for differental frame dropper
-    window: windowing kind
-    window_size: window size for numpy algorithms
-    chunk_size: processing chunk size for `ocrWithLocalMaxima()`
-    path_frames: temporary path for frame files
+    - lang: language for Tesseract OCR
+    - is_crop_debug: show OpenCV capture GUI when processing
+    - diff_thres: threshold for differental frame dropper
+    - window: windowing kind
+    - window_size: window size for numpy algorithms
+    - chunk_size: processing chunk size for `ocrWithLocalMaxima()`
+    - path_frames: temporary path for frame files
     '''
     require(path_frames.is_dir(), f"{path_frames} must be dir")
     self.lang, self.is_crop_debug, self.diff_thres = lang, is_crop_debug, diff_thres
@@ -187,7 +115,7 @@ class ExtractSubtitles(BasicCvProcess):
       croped_img = crop.sliceUMat(mat)
       if self.is_crop_debug:
         cv2.imshow(ExtractSubtitles.WIN_SUBTITLE_RECT, croped_img)
-        cv2WaitKey(' ')
+        cv2WaitKey()
       return croped_img
     else: return mat
 
@@ -210,7 +138,7 @@ class ExtractSubtitles(BasicCvProcess):
       if self.is_crop_debug:
         cv2.imshow(ExtractSubtitles.WIN_LAST_IMAGE, img)
         cv2.imshow(ExtractSubtitles.WIN_LAST_FRAME, curr_frame) #< must have single title, to animate
-        if cv2WaitKey('q'): break
+        if cv2WaitKey() == 'q': break
       if curr_frame is not None: # and prev_frame is not None
         diff = cv2.absdiff(curr_frame, prev_frame) #< main logic goes here
         count = np.sum(diff)
@@ -225,7 +153,7 @@ class ExtractSubtitles(BasicCvProcess):
     for (a, b) in zipWithNext(frames):
       vb = np.float(b.value if b.value != 0 else 1) #< what if no motion between (last-1)&last ?
       if relativeChange(np.float(a.value), vb) < self.diff_thres: continue
-      if DEBUG: print(f"[{b.no}] prev: {a.value}, curr: {b.value}", file=stderr)
+      printDebug(f"[{b.no}] prev: {a.value}, curr: {b.value}")
       cv2.imwrite(self.frameFilepath(a), a.img)
 
   def recognizeText(self, frame: Frame) -> str:
@@ -238,18 +166,19 @@ class ExtractSubtitles(BasicCvProcess):
   def onFrameList(self, frames):
     if self.diff_thres != None: self.writeFramesThresholded(frames)
 
-  def ocrWithLocalMaxima(self, frames, on_new_subtitle) -> array:
+  def ocrWithLocalMaxima(self, frames, on_new_subtitle, name) -> array:
     ''' chunked processing using window, reducing memory usage '''
     frame_list, frame_diffs = collect2(lambda it: (it, it.value), frames)
     self.onFrameList(frame_list)
     diff_array = smooth(np.array(frame_diffs), self.window_size, self.window)
     frame_indices = np.subtract(np.asarray(argrelextrema(diff_array, np.greater))[0], 1)
 
-    output_lose_subtitle = (self.path_frames/"loser.txt").open("a+")
+    output_lose_subtitle = (self.path_frames/f"loser_{name}.txt").open("a+")
     last_subtitle = ""
     for frame in map(frame_list.__getitem__, frame_indices):
-      cv2.imshow(ExtractSubtitles.WIN_SUBTITLE_RECT, frame.img)
-      cv2WaitKey(' ')
+      if self.is_crop_debug:
+        cv2.imshow(ExtractSubtitles.WIN_SUBTITLE_RECT, frame.img)
+        cv2WaitKey()
       subtitle = self.recognizeText(frame)
       if self.subtitleShouldReplace(last_subtitle, subtitle): #< check for repeated subtitles 
         last_subtitle = subtitle #v also clean-up new subtitle
@@ -259,32 +188,30 @@ class ExtractSubtitles(BasicCvProcess):
     output_lose_subtitle.close()
     return diff_array
 
-  _levenshtein = NormalizedLevenshtein()
-  def stringSimilarity(self, a, b) -> float: return self._levenshtein.distance(a, b)
-
   def subtitleShouldReplace(self, a, b) -> bool:
-    return b != a and b.count("\n") == 0 and self.stringSimilarity(a, b) > (1/4)
+    return b != a and b.count("\n") == 0 and stringSimilarity(a, b) > (1/4)
 
   def postprocessSubtitle(self, text) -> str:
     return stripAll(NOT_COMMON_PUNTUATION, text)
 
-  def runOn(self, cap: VideoCapture, crop: Rect, on_new_subtitle = print) -> array:
+  def runOn(self, cap: VideoCapture, crop: Rect, on_new_subtitle = print, name = "default") -> array:
     '''
     cap: video input
     crop: Rect area for lyric graphics
     '''
-    frames = self.solveFrameDifferences(cap, crop, AsProgress if feat(FEAT_PROGRESS) else AsNoOp)
-    processChunk = lambda it: self.ocrWithLocalMaxima(it, on_new_subtitle)
+    frames = self.solveFrameDifferences(cap, crop, AsProgress if feats(FEAT_PROGRESS) else AsNoOp)
+    processChunk = lambda it: self.ocrWithLocalMaxima(it, on_new_subtitle, name)
     diff_array_parts = map(processChunk, chunked(self.chunk_size, frames))
     diff_array = reduce(lambda a, b: concatenate(array([a, b])), diff_array_parts)
     cv2.destroyAllWindows()
     return diff_array
 
   def drawPlot(self, diff_array):
-    plot.figure(figsize=(40, 20))
+    fig_diff = plot.figure(figsize=(40, 20))
     plot.locator_params(100)
     plot.stem(diff_array, use_line_collection=True)
-    plot.savefig(self.path_frames/"plot.png")
+    return fig_diff
+
 
 # == Main ==
 def makeArgumentParser():
@@ -293,7 +220,7 @@ def makeArgumentParser():
     description="Extract subtitles using OpenCV / Tesseract OCR with frame difference algorithm")
 
   apg = app.add_argument_group("basic workflow")
-  apg.add_argument("video", type=FileType("r"), help="source file to extract from")
+  apg.add_argument("video", nargs="+", type=FileType("r"), help="source file to extract from")
   apg.add_argument("-crop", metavar="(x,y)(w,h)",
     type=PatternType(r"\((\d+),(\d+)\)", toMapper(int)),
     default=None, help="crop out subtitles area, improve recognition accuracy")
@@ -304,20 +231,16 @@ def makeArgumentParser():
   apg1.add_argument("--crop-debug", action="store_true", help="show OpenCV GUI when processing")
   apg1.add_argument("--draw-plot", action="store_true", help="draw difference plot for statics")
   apg1.add_argument(FEAT_PROGRESS, action="store_true", help="show progress bar")
-  apg1.add_argument("--debug", action="store_true", help="print debug info")
+  apg1.add_argument(FEAT_DEBUG, action="store_true", help="print debug info")
   BasicCvProcess.registerArguments(apg1)
   return app
 
 def mkdirIfNotExists(self: Path):
   if not self.exists(): self.mkdir()
 
-if __name__ == "__main__":
-  app = makeArgumentParser()
-  cfg = app.parse_args() #v then assign config
-  video_path = cfg.video.name
+def makeExtractor(cfg: Namespace):
   lang, crop, crop_debug, thres, window, window_size, chunk_size, frames_dir = cfg.lang, cfg.crop, cfg.crop_debug, cfg.thres, cfg.window, cfg.window_size, cfg.chunk_size, cfg.frames_dir
   printAttributes(
-    video_path=video_path,
     subtitle_language=lang,
     crop=crop,
     threshold=thres,
@@ -325,15 +248,32 @@ if __name__ == "__main__":
     filter_window_size=window_size,
     process_chunk_size=chunk_size,
     frame_directory=frames_dir
-  ) #v extra config
-  if cfg.use_progress: USE_FEATURE.add(FEAT_PROGRESS)
-  if cfg.debug: DEBUG = True
-  print("Extracting key frames...")
-  capture = VideoCapture(video_path)
-  printAttributes(video_props=cv2VideoProps(capture))
-
+  )
   extractor = ExtractSubtitles(lang, crop_debug, thres,
     window, window_size, chunk_size, also(mkdirIfNotExists, Path(frames_dir)) )
-  diff_array = extractor.runOn(capture, let(lambda it: Rect(*it[0], *it[1]), crop))
-  capture.release()
-  if cfg.draw_plot: extractor.drawPlot(diff_array)
+  if cfg.use_progress: #< assign extra config
+    USE_FEATURE.add(FEAT_PROGRESS)
+  if cfg.debug:
+    USE_FEATURE.add(FEAT_DEBUG)
+  return extractor
+
+# == Entry ==
+def main(args):
+  app = makeArgumentParser()
+  cfg = app.parse_args(args)
+  extractor = makeExtractor(cfg)
+  for video_path in map(lambda it: it.name, cfg.video):
+    video_name = Path(video_path).name
+    printAttributes(video_path=video_path)
+    print("Extracting key frames...")
+
+    capture = VideoCapture(video_path)
+    printAttributes(video_props=cv2VideoProps(capture))
+    diff_array = extractor.runOn(capture, let(lambda it: Rect(*it[0], *it[1]), cfg.crop), name=video_name)
+    capture.release()
+    if cfg.draw_plot:
+      fig_diff = extractor.drawPlot(diff_array)
+      plot.show()
+      fig_diff.savefig(cfg.frames_dir/f"plot_{video_name}.png")
+
+if __name__ == "__main__": main(argv[1:]) #< no program name
