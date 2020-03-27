@@ -1,3 +1,5 @@
+from typing import Tuple
+
 import cv2
 from cv2 import UMat, VideoCapture
 from cv2 import CAP_PROP_FRAME_COUNT, CAP_PROP_FPS, CAP_PROP_FRAME_WIDTH, CAP_PROP_FRAME_HEIGHT
@@ -9,7 +11,7 @@ def cv2NormalWin(title):
 def cv2WaitKey(delay_ms = 1) -> str:
   return chr(cv2.waitKey(delay_ms) & 0xFF)
 
-def cv2VideoProps(cap: VideoCapture) -> (int, int, int, int):
+def cv2VideoProps(cap: VideoCapture) -> Tuple[int]:
   ''' (count, fps, width, height) '''
   props = (CAP_PROP_FRAME_COUNT, CAP_PROP_FPS, CAP_PROP_FRAME_WIDTH, CAP_PROP_FRAME_HEIGHT)
   return tuple(map(int, map(cap.get, props)))

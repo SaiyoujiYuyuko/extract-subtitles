@@ -1,6 +1,8 @@
 #!/bin/env python3
 # -*- coding: utf-8 -*-
 
+from typing import Iterator
+
 from argparse import ArgumentParser, Namespace, FileType
 from pathlib import Path
 from os import remove
@@ -19,6 +21,7 @@ from libs.cv_utils import cv2VideoProps, cv2NormalWin, cv2WaitKey
 import cv2
 from cv2 import UMat, VideoCapture
 from pytesseract import image_to_string
+
 import numpy as np
 from numpy import array, convolve, concatenate
 from scipy.signal import argrelextrema
@@ -52,7 +55,7 @@ def smooth(a: array, window_size: int, window = "hanning") -> array:
   s = np.r_[2 * a[0] - a[window_size:1:-1],
             a, 2 * a[-1] - a[-1:-window_size:-1]]
   w = getattr(np, window)(window_size) if window != "flat" else np.ones(window_size, "d")
-  y = np.convolve(w / w.sum(), s, mode="same")
+  y = convolve(w / w.sum(), s, mode="same")
   return y[window_size -1 : -window_size +1]
 
 def stripAll(symbols, text) -> str:
@@ -68,7 +71,7 @@ class BasicCvProcess:
   def __init__(self, window: str, window_size: int, chunk_size: int, path_frames: Path):
     self.window, self.window_size, self.chunk_size, self.path_frames = window, window_size, chunk_size, path_frames
   @staticmethod
-  def registerArguments(ap: ArgumentParser):
+  def registerArguments(ap):
     ap.add_argument("--window", type=str, default="hamming", help=f"filter window, one of {smooth_supported_windows}")
     ap.add_argument("--window-size", type=int, default=30, help="matrix filtering window size")
     ap.add_argument("--chunk-size", type=int, default=300, help="processing frame chunk size")
@@ -122,7 +125,7 @@ class ExtractSubtitles(BasicCvProcess):
   def postprocessUMat(self, mat: UMat) -> UMat:
     return mat #cv2.cvtColor(mat, cv2.COLOR_BGR2LUV)
 
-  def solveFrameDifferences(self, cap: VideoCapture, crop: Rect, fold) -> Frame:
+  def solveFrameDifferences(self, cap: VideoCapture, crop: Rect, fold) -> Iterator[Frame]:
     postprocess = lambda mat: self.postprocessUMat(self.cropUMat(mat, crop))
     if self.is_crop_debug:
       cv2NormalWin(ExtractSubtitles.WIN_LAST_IMAGE)
@@ -170,7 +173,7 @@ class ExtractSubtitles(BasicCvProcess):
     ''' chunked processing using window, reducing memory usage '''
     frame_list, frame_diffs = collect2(lambda it: (it, it.value), frames)
     self.onFrameList(frame_list)
-    diff_array = smooth(np.array(frame_diffs), self.window_size, self.window)
+    diff_array = smooth(array(frame_diffs), self.window_size, self.window)
     frame_indices = np.subtract(np.asarray(argrelextrema(diff_array, np.greater))[0], 1)
 
     output_lose_subtitle = (self.path_frames/f"loser_{name}.txt").open("a+")

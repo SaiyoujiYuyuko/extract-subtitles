@@ -1,6 +1,8 @@
 #!/bin/env python3
 # -*- coding: utf-8 -*-
 
+from typing import Tuple
+
 from argparse import ArgumentParser, FileType
 from re import findall
 from pathlib import Path
@@ -46,6 +48,7 @@ def printResult(op):
   def _invoke(*args, **kwargs):
     res = op(*args, **kwargs)
     print(res); return res
+  return _invoke
 
 
 
@@ -71,7 +74,7 @@ def cv2WaitKey(key_code, delay_ms = 1) -> bool:
   require(len(key_code) == 1, f"{repr(key_code)} must be single char")
   return cv2.waitKey(delay_ms) & 0xFF == ord(key_code)
 
-def cv2VideoProps(cap: cv2.VideoCapture, props = (CAP_PROP_FRAME_COUNT, CAP_PROP_FPS, CAP_PROP_FRAME_WIDTH, CAP_PROP_FRAME_HEIGHT)) -> (int, int, int, int):
+def cv2VideoProps(cap: cv2.VideoCapture, props = (CAP_PROP_FRAME_COUNT, CAP_PROP_FPS, CAP_PROP_FRAME_WIDTH, CAP_PROP_FRAME_HEIGHT)) -> Tuple[int, ...]:
   ''' (count, fps, width, height) '''
   return tuple(map(int, map(cap.get, props)))
 
@@ -112,7 +115,7 @@ def recognizeText(name) -> str:
 def relativeChange(a: float, b: float) -> float: return (b - a) / max(a, b)
 
 
-def solveFrameDifferences(cap: cv2.VideoCapture, on_frame = lambda x: ()) -> (list, list):
+def solveFrameDifferences(cap: cv2.VideoCapture, on_frame = lambda x: ()) -> Tuple[list, list]:
   frames, frame_diffs = [], []
 
   index = 0
@@ -153,8 +156,8 @@ def writeFramesThreshold(frames):
   for (a, b) in zipWithNext(frames):
     if relativeChange(np.float(a.value), np.float(b.value)) < app_cfg.thres: continue
     #print("prev_frame:"+str(frames[i-1].value)+"  curr_frame:"+str(frames[i].value))
-    name = filename_frame(frames[i])
-    cv2.imwrite(inFramesDir(name), frames[i].frame)
+    name = filename_frame(a)
+    cv2.imwrite(inFramesDir(name), a.frame)
 
 def ocrWithLocalMaxima(frames, frame_diffs, on_new_subtitle = print) -> np.array:
   diff_array = np.array(frame_diffs)
@@ -191,7 +194,7 @@ To debug the appropriate value, set -crop-debug to show cropped result.
 '''
 
 apg1 = app.add_argument_group("misc settings")
-regex_tuple = PatternType("\((\d+),(\d+)\)", toMapper(int))
+regex_tuple = PatternType(r"\((\d+),(\d+)\)", toMapper(int))
 apg1.add_argument("-crop", metavar="(x,y)(w,h)", type=regex_tuple, default=None, help="crop out subtitles area, improve recognition accuracy")
 apg1.add_argument("--crop-debug", action="store_true", help="show cropped result if avaliable")
 
