@@ -1,7 +1,7 @@
 #!/bin/env python3
 # -*- coding: utf-8 -*-
 
-from typing import Tuple
+from typing import Tuple, cast
 
 from argparse import ArgumentParser, FileType
 
@@ -33,7 +33,7 @@ def guiSelectionUMat(mat: UMat, title = "Rect Selection (r:replot; c:OK)", box_c
     if key == 'r': shot = mat.copy()
     elif key == 'c': break
   destroyWindow(title)
-  return (p_lt, p_rd)
+  return cast(Tuple, (p_lt, p_rd))
 
 def rectLtrd2Xywh(lt: Tuple[int, int], rd: Tuple[int, int]) -> Tuple[int, int, int, int]:
   x1, y1 = lt
@@ -49,7 +49,7 @@ def selectCropRect(cap: VideoCapture, title = "Video (c:OK)") -> Tuple[int, int,
       lt, rd = guiSelectionUMat(img)
       return rectLtrd2Xywh(lt, rd)
     unfinished, img = cap.read()
-  return None
+  raise EOFError("video ended, but selection isn't made")
 
 app = ArgumentParser("gui_crop_select", description="Interactive video crop rect selection")
 app.add_argument("video", nargs="+", type=FileType("r"), help="video paths")
@@ -60,4 +60,4 @@ if __name__ == "__main__":
     cap = VideoCapture(path)
     t = selectCropRect(cap)
     cap.release()
-    print(f"{t[0:2]}{t[2:4]}")
+    print(f"{t[0:2]}{t[2:4]}".replace(" ", ""))

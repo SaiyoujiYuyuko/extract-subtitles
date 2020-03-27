@@ -10,6 +10,8 @@ from sys import argv, stderr
 from functools import reduce
 from progressbar import ProgressBar
 
+from json import dumps
+
 from libs.fun_utils import let, also, require
 from libs.fun_utils import zipWithNext, chunked, collect2
 from libs.fun_utils import PatternType, toMapper, printAttributes
@@ -93,7 +95,7 @@ class ExtractSubtitles(BasicCvProcess):
   '''
   Operation of extracting video subtitle area as text,
   - configurable: `cropUMat`, `postprocessUMat`, `onFrameList`, `subtitleShouledReplace`, `postpreocessSubtitle`
-  - workflow: `runOn`, `solveFrameDifferences`, `on`, `ocrWithLocalMaxima`
+  - workflow: `runOn`, `solveFrameDifferences`, `onFrameList`, `ocrWithLocalMaxima`
   '''
   WIN_LAST_IMAGE = "Last Image"
   WIN_LAST_FRAME = "Last Frame (processed image)"
@@ -169,27 +171,42 @@ class ExtractSubtitles(BasicCvProcess):
   def onFrameList(self, frames):
     if self.diff_thres != None: self.writeFramesThresholded(frames)
 
-  def ocrWithLocalMaxima(self, frames, on_new_subtitle, name) -> array:
-    ''' chunked processing using window, reducing memory usage '''
+  def ocrWithLocalMaxima(self, frames, reducer) -> array:
+    '''
+    - frames: chunked processing using window, reducing memory usage
+    - reducer: accept (frame, subtitle)
+    '''
     frame_list, frame_diffs = collect2(lambda it: (it, it.value), frames)
     self.onFrameList(frame_list)
     diff_array = smooth(array(frame_diffs), self.window_size, self.window)
     frame_indices = np.subtract(np.asarray(argrelextrema(diff_array, np.greater))[0], 1)
 
-    output_lose_subtitle = (self.path_frames/f"loser_{name}.txt").open("a+")
-    last_subtitle = ""
     for frame in map(frame_list.__getitem__, frame_indices):
       if self.is_crop_debug:
         cv2.imshow(ExtractSubtitles.WIN_SUBTITLE_RECT, frame.img)
         cv2WaitKey()
       subtitle = self.recognizeText(frame)
-      if self.subtitleShouldReplace(last_subtitle, subtitle): #< check for repeated subtitles 
-        last_subtitle = subtitle #v also clean-up new subtitle
-        on_new_subtitle(frame.no, self.postprocessSubtitle(subtitle))
-      else:
-        output_lose_subtitle.write(f"{frame.no} {subtitle}\n")
-    output_lose_subtitle.close()
+      reducer.accept(frame, subtitle)
+    reducer.finish()
     return diff_array
+
+  class DefaultOcrFold(Reducer):
+    def __init__(self, ctx, name, on_new_subtitle = print):
+      self.ctx = ctx; self.on_new_subtitle = on_new_subtitle
+      self.files = [(ctx.path_frames/f"{group}_{name}.txt").open("a+") for group in ["timeline", "loser"]]
+      self.out_timeline, self.out_lose_subtitle = self.files
+      self.last_subtitle = ""
+    def accept(self, frame, subtitle):
+      self.out_timeline.write(f"{frame.no} {dumps(subtitle, ensure_ascii=False)}\n")
+      if self.ctx.subtitleShouldReplace(self.last_subtitle, subtitle): #< check for repeated subtitles 
+        self.last_subtitle = subtitle #v also clean-up new subtitle
+        self.on_new_subtitle(frame.no, self.ctx.postprocessSubtitle(subtitle))
+      else:
+        self.out_lose_subtitle.write(f"{frame.no} {subtitle}\n")
+    def finish(self): #< in (single chunk) OCR
+      for f in self.files: f.flush()
+    def finishAll(self):
+      for f in self.files: f.close()
 
   def subtitleShouldReplace(self, a, b) -> bool:
     return b != a and b.count("\n") == 0 and stringSimilarity(a, b) > (1/4)
@@ -197,15 +214,19 @@ class ExtractSubtitles(BasicCvProcess):
   def postprocessSubtitle(self, text) -> str:
     return stripAll(NOT_COMMON_PUNTUATION, text)
 
-  def runOn(self, cap: VideoCapture, crop: Rect, on_new_subtitle = print, name = "default") -> array:
+  def runOn(self, cap: VideoCapture, crop: Rect, fold = DefaultOcrFold, name = "default") -> array:
     '''
-    cap: video input
-    crop: Rect area for lyric graphics
+    - cap: video input
+    - crop: Rect area for lyric graphics
+    - fold: init (self, name)
     '''
     frames = self.solveFrameDifferences(cap, crop, AsProgress if feats(FEAT_PROGRESS) else AsNoOp)
-    processChunk = lambda it: self.ocrWithLocalMaxima(it, on_new_subtitle, name)
+    reducer = fold(self, name)
+    processChunk = lambda it: self.ocrWithLocalMaxima(it, reducer)
     diff_array_parts = map(processChunk, chunked(self.chunk_size, frames))
     diff_array = reduce(lambda a, b: concatenate(array([a, b])), diff_array_parts)
+
+    reducer.finishAll()
     cv2.destroyAllWindows()
     return diff_array
 
