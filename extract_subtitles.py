@@ -17,7 +17,8 @@ from libs.fun_utils import zipWithNext, chunked, collect2
 from libs.fun_utils import PatternType, toMapper, printAttributes
 from libs.fun_utils import Reducer, AsNoOp
 
-from libs.cv_utils import Frame, Rect
+from libs.cv_utils import Frame, Rect, BasicCvProcess
+from libs.cv_utils import smooth as orig_smooth, relativeChange, stringSimilarity
 from libs.cv_utils import cv2VideoProps, cv2NormalWin, cv2WaitKey
 
 import cv2
@@ -25,9 +26,8 @@ from cv2 import UMat, VideoCapture
 from pytesseract import image_to_string
 
 import numpy as np
-from numpy import array, convolve, concatenate
+from numpy import array, concatenate
 from scipy.signal import argrelextrema
-from strsimpy.normalized_levenshtein import NormalizedLevenshtein
 
 import matplotlib.pyplot as plot
 
@@ -42,44 +42,12 @@ feats = USE_FEATURE.__contains__
 def printDebug(*args, **kwargs):
   if feats(FEAT_DEBUG): print(*args, **kwargs, file=stderr)
 
-def relativeChange(a: float, b: float) -> float:
-  return (b - a) / max(a, b)
-
-smooth_supported_windows = ["flat", "hanning", "hamming", "bartlett", "blackman"]
-def smooth(a: array, window_size: int, window = "hanning") -> array:
-  supported_windows = smooth_supported_windows
-  printDebug(f"smooth [...x{len(a)}], {window_size} {window}")
-  if window_size < 3: return a
-  require(a.ndim == 1, "smooth only accepts 1 dimension arrays")
-  require(a.size >= window_size, "input vector size must >= window size")
-  require(window in supported_windows, f"window must in {supported_windows}")
-
-  s = np.r_[2 * a[0] - a[window_size:1:-1],
-            a, 2 * a[-1] - a[-1:-window_size:-1]]
-  w = getattr(np, window)(window_size) if window != "flat" else np.ones(window_size, "d")
-  y = convolve(w / w.sum(), s, mode="same")
-  return y[window_size -1 : -window_size +1]
-
 def stripAll(symbols, text) -> str:
   return text.translate({ord(c):"" for c in symbols})
 
-_levenshtein = NormalizedLevenshtein()
-def stringSimilarity(a: str, b: str) -> float:
-  return _levenshtein.distance(a, b)
-
-
-class BasicCvProcess:
-  ''' Helper class for simple CV programs (window+size, chunk_size, path_frames) '''
-  def __init__(self, window: str, window_size: int, chunk_size: int, path_frames: Path):
-    self.window, self.window_size, self.chunk_size, self.path_frames = window, window_size, chunk_size, path_frames
-  @staticmethod
-  def registerArguments(ap):
-    ap.add_argument("--window", type=str, default="hamming", help=f"filter window, one of {smooth_supported_windows}")
-    ap.add_argument("--window-size", type=int, default=30, help="matrix filtering window size")
-    ap.add_argument("--chunk-size", type=int, default=300, help="processing frame chunk size")
-    ap.add_argument("--frames-dir", type=Path, default=Path("frames/"), help="directory to store the processed frames")
-  def frameFilepath(self, it: Frame) -> str:
-    return str(self.path_frames/f"frame_{it.no}.jpg")
+def smooth(a, window_size, window) -> array:
+  printDebug(f"smooth [...x{len(a)}], {window_size} {window}")
+  return orig_smooth(a, window_size, window)
 
 class AsProgress(Reducer):
   def __init__(self, cap: VideoCapture, crop):
