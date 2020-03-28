@@ -20,9 +20,9 @@ def makeConvertorFps2Ms(fps):
   return lambda no: (float(no) / fps) * SEC_MS
 
 
-def millis2LrcTime(ms) -> str:
+def millis2LrcTime(ms, ms_sep = ".") -> str:
   mins, secs, r = millis2MinSecMs(ms)
-  return f"{time_just(mins)}:{time_just(secs)}.{int(r)}"
+  return f"{time_just(mins)}:{time_just(secs)}{ms_sep}{int(r)}"
 
 def dumpsLrc(ms, text) -> str:
   return f"[{millis2LrcTime(ms)}] {text}"
@@ -31,7 +31,3 @@ def loadsLrc(text) -> Tuple[int, str]:
   mm, ss, rrr, lyric = findall(r"^\[(\d{2}):(\d{2}).(\d+)\] ?(.+)$", text)[0]
   mins, secs, r = map(int, (mm, ss, rrr) )
   return (mins*MIN_MS + secs*SEC_MS + r, lyric)
-
-def loadsLrcFile(text, lines = lambda s: s.split("\n")) -> Iterator[Tuple[int, str]]:
-  for line in lines(text):
-    yield loadsLrc(line)

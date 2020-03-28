@@ -7,7 +7,7 @@ from json import dumps, loads
 
 from libs.fun_utils import zipWithNext
 from libs.cv_utils import stringSimilarity
-from libs.lrc import makeConvertorFps2Ms, dumpsLrc
+from libs.lrc import makeConvertorFps2Ms, dumpsLrc, millis2LrcTime
 
 class Record:
   ''' Value record on the time line '''
@@ -19,6 +19,8 @@ class Record:
   def loads(line):
     start, end, text = findall(r"^(\d+)-(\d+) (.*)$", line)[0]
     return Record(int(start), int(end), loads(text))
+  def mapTime(self, transform):
+    return Record(transform(self.start), transform(self.end), self.value)
 
 class Timeline:
   def __init__(self, time: int, value):
@@ -60,11 +62,25 @@ def stdinSimplify():
     rec = Record.loads(line)
     print(Timeline(rec.start, rec.value))
 
-def stdinToLRC(fps):
+def makeLyricFormater(fmt):
+  if fmt == "lrc": return lambda rec: dumpsLrc(rec.start, rec.value)
+  elif fmt == "srt":
+    fTime = lambda ms: millis2LrcTime(ms, ms_sep=",")
+    index = 1
+    def _nextRecord(rec):
+      nonlocal index
+      line = f"{index}\n{fTime(rec.start)} --> {fTime(rec.end)}\n{rec.value}\n"
+      index += 1
+      return line
+    return _nextRecord
+  else: raise ValueError(f"unknown format {fmt}")
+
+def stdinToLRC(fps, fmt = "lrc"):
   ms = makeConvertorFps2Ms(float(fps))
+  accept = makeLyricFormater(fmt)
   for line in lines(stdin):
-    start, text = Timeline.loads(line)
-    lrc = dumpsLrc(ms(start), text)
+    rec = Record.loads(line).mapTime(ms)
+    lrc = accept(rec)
     print(lrc)
 
 handler = { "merge-debug": mergeDebug, "merge": merge, "simplify": stdinSimplify, "to-lrc": stdinToLRC }
@@ -72,7 +88,7 @@ handler = { "merge-debug": mergeDebug, "merge": merge, "simplify": stdinSimplify
 def main(args):
   if len(args) == 0:
     tl = "timeline_file"
-    print(f"Usage: merge-debug <{tl}> | merge <{tl}> <strsim_bound_max> | simplify | to-lrc <fps>", file=stderr)
+    print(f"Usage: merge-debug <{tl}> | merge <{tl}> <strsim_bound_max> | simplify | to-lrc <fps> (srt)", file=stderr)
     return
   key_op = args[0]
   handler[key_op](*args[1:])
