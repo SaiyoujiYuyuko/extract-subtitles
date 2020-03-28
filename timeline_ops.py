@@ -39,7 +39,7 @@ def mergeDebug(path):
   for (a, b) in zipWithNext(openTimeline(path)):
     ta, sa = a; tb, sb = b
     v = stringSimilarity(sa, sb)
-    print(f"{ta}-{tb} {str(v)[0:3]} {sa} | {sb}")
+    print(f"{ta}-{tb} {str(v)[0:4].ljust(4, '0')} {sa} | {sb}")
 
 def merge(path, strsim_bound_max):
   bound_max = float(strsim_bound_max)
