@@ -7,7 +7,7 @@ from json import dumps, loads
 
 from libs.fun_utils import zipWithNext
 from libs.cv_utils import stringSimilarity
-from libs.lrc import makeConvertorFps2Ms, dumpsLrc, millis2LrcTime
+from libs.lrc import makeConvertorFps2Ms, dumpsLrc, millis2HourMinSecMs, time_just
 
 class Record:
   ''' Value record on the time line '''
@@ -62,10 +62,15 @@ def stdinSimplify():
     rec = Record.loads(line)
     print(Timeline(rec.start, rec.value))
 
+#v Lyric and formats
+def millis2SrtTime(ms, ms_sep = ",") -> str:
+  hrs, mins, secs, r = millis2HourMinSecMs(ms)
+  return f"{time_just(hrs)}:{time_just(mins)}:{time_just(secs)}{ms_sep}{int(r)}"
+
 def makeLyricFormater(fmt):
   if fmt == "lrc": return lambda rec: dumpsLrc(rec.start, rec.value)
   elif fmt == "srt":
-    fTime = lambda ms: millis2LrcTime(ms, ms_sep=",")
+    fTime = millis2SrtTime
     index = 1
     def _nextRecord(rec):
       nonlocal index

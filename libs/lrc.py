@@ -3,8 +3,9 @@
 from typing import Tuple, List, Iterator
 from re import findall
 
-MIN_MS = 60*1000
 SEC_MS = 1000
+MIN_MS = 60*SEC_MS
+HOUR_MS = 60*MIN_MS
 
 def time_just(v: float, n = 2, pad = '0') -> str:
   text = str(int(v))
@@ -14,6 +15,12 @@ def millis2MinSecMs(ms) -> Tuple[int, int, int]:
   mins, r = divmod(ms, MIN_MS)
   secs, r = divmod(r, SEC_MS)
   return (mins, secs, r)
+
+def millis2HourMinSecMs(ms) -> Tuple[int, int, int, int]:
+  hrs, r = divmod(ms, HOUR_MS)
+  mins, r = divmod(r, MIN_MS)
+  secs, r = divmod(r, SEC_MS)
+  return (hrs, mins, secs, r)
 
 def makeConvertorFps2Ms(fps):
   ''' creates a frame-no to millis convertor '''
