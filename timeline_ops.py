@@ -7,7 +7,7 @@ from json import dumps, loads
 
 from libs.fun_utils import zipWithNext
 from libs.cv_utils import stringSimilarity
-from libs.lrc import makeConvertorFps2Ms, assembleLrc
+from libs.lrc import makeConvertorFps2Ms, dumpsLrc
 
 class Record:
   ''' Value record on the time line '''
@@ -16,26 +16,30 @@ class Record:
   def __str__(self):
     return f"{self.start}-{self.end} {dumps(self.value, ensure_ascii=False)}"
   @staticmethod
-  def loads(text):
-    start, end, text = findall(r"^(\d+)-(\d+) (.*)$", text)[0]
+  def loads(line):
+    start, end, text = findall(r"^(\d+)-(\d+) (.*)$", line)[0]
     return Record(int(start), int(end), loads(text))
 
-def loadsTimeline(line):
-  time, text = findall(r"^(\d+) (.*)$", line)[0]
-  return [int(time), loads(text)]
-def dumpsTimeline(time, text):
-  return f"{time} {dumps(text, ensure_ascii=False)}"
+class Timeline:
+  def __init__(self, time: int, value):
+    self.time, self.value = time, value
+  def __str__(self):
+    return f"{self.time} {dumps(self.value, ensure_ascii=False)}"
+  @staticmethod
+  def loads(line):
+    time, text = findall(r"^(\d+) (.*)$", line)[0]
+    return [int(time), loads(text)]
 
-#^ Two data&representations: Record(+end) and timeline(start, text)
+#^ Two data&representations: Record(+end) and timeline(time, text)
 
 def openTimeline(path):
-  return [loadsTimeline(ln) for ln in open(path, "r").readlines()]
+  return [Timeline.loads(ln) for ln in open(path, "r").readlines()]
 
 def mergeDebug(path):
   for (a, b) in zipWithNext(openTimeline(path)):
     ta, sa = a; tb, sb = b
     v = stringSimilarity(sa, sb)
-    print(f"{ta}-{tb} {v} {sa} | {sb}")
+    print(f"{ta}-{tb} {str(v)[0:3]} {sa} | {sb}")
 
 def merge(path, strsim_bound_max):
   bound_max = float(strsim_bound_max)
@@ -46,21 +50,21 @@ def merge(path, strsim_bound_max):
       last_text = text
       end = time #< renew end
     else:
+      print(Record(start, end, last_text))
       last_text, start, end = text, time, time
-      print(Record(start, end, text))
 
 lines = lambda s: iter(s.readline, "")
 
 def stdinSimplify():
   for line in lines(stdin):
     rec = Record.loads(line)
-    print(dumpsTimeline(rec.start, rec.value))
+    print(Timeline(rec.start, rec.value))
 
 def stdinToLRC(fps):
   ms = makeConvertorFps2Ms(float(fps))
   for line in lines(stdin):
-    start, text = loadsTimeline(line)
-    lrc = assembleLrc(ms(start), text)
+    start, text = Timeline.loads(line)
+    lrc = dumpsLrc(ms(start), text)
     print(lrc)
 
 handler = { "merge-debug": mergeDebug, "merge": merge, "simplify": stdinSimplify, "to-lrc": stdinToLRC }
