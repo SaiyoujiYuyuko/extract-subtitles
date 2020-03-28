@@ -64,6 +64,8 @@ def smooth(a: array, window_size: int, window = "hanning") -> array:
 class BasicCvProcess:
   ''' Helper class for simple CV programs (window+size, chunk_size, path_frames) '''
   def __init__(self, window: str, window_size: int, chunk_size: int, path_frames: Path):
+    require(chunk_size > window_size, f"chunk size({chunk_size}) must fill(≥) window({window_size})")
+    require(path_frames.is_dir(), f"{path_frames} must be dir")
     self.window, self.window_size, self.chunk_size, self.path_frames = window, window_size, chunk_size, path_frames
   @staticmethod
   def registerArguments(ap):

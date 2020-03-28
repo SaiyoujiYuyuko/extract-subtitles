@@ -1,7 +1,7 @@
 #!/bin/env python3
 # -*- coding: utf-8 -*-
 
-from typing import Iterator
+from typing import Tuple, Iterator
 
 from argparse import ArgumentParser, Namespace, FileType
 from pathlib import Path
@@ -79,7 +79,6 @@ class ExtractSubtitles(BasicCvProcess):
     - chunk_size: processing chunk size for `ocrWithLocalMaxima()`
     - path_frames: temporary path for frame files
     '''
-    require(path_frames.is_dir(), f"{path_frames} must be dir")
     self.lang, self.is_crop_debug, self.diff_thres = lang, is_crop_debug, diff_thres
     super().__init__(window, window_size, chunk_size, path_frames)
 
@@ -114,8 +113,7 @@ class ExtractSubtitles(BasicCvProcess):
         if cv2WaitKey() == 'q': break
       if curr_frame is not None: # and prev_frame is not None
         diff = cv2.absdiff(curr_frame, prev_frame) #< main logic goes here
-        count = np.sum(diff)
-        yield Frame(index, curr_frame, count)
+        yield Frame(index, curr_frame, np.sum(diff))
       prev_frame = curr_frame
       unfinished, img = cap.read()
       index = index + 1
@@ -124,20 +122,22 @@ class ExtractSubtitles(BasicCvProcess):
 
   def writeFramesThresholded(self, frames):
     for (a, b) in zipWithNext(frames):
-      vb = np.float(b.value if b.value != 0 else 1) #< what if no motion between (last-1)&last ?
-      if relativeChange(np.float(a.value), vb) < self.diff_thres: continue
-      printDebug(f"[{b.no}] prev: {a.value}, curr: {b.value}")
+      if b.value == 0: continue #< what if no motion between (last-1)&last ?
+      k_change = relativeChange(np.float(a.value), np.float(b.value))
+      if k_change < self.diff_thres: continue
+      printDebug(f"[{b.no}]({k_change}) prev: {a.value}, curr: {b.value}")
       cv2.imwrite(self.frameFilepath(a), a.img)
 
   def recognizeText(self, frame: Frame) -> str:
-    #path = self.frameFilepath(frame)
-    #cv2.imwrite(path, frame.img)
-    #img = cv2.imread(path)
-    #remove(path) #< Delete recognized frame images
     return image_to_string(frame.img, self.lang)
 
   def onFrameList(self, frames):
     if self.diff_thres != None: self.writeFramesThresholded(frames)
+
+  def solveValidFrames(self, frames, frame_diffs) -> Tuple[array, Iterator[UMat]]:
+    diff_array = smooth(array(frame_diffs), self.window_size, self.window)
+    frame_indices = np.subtract(np.asarray(argrelextrema(diff_array, np.greater))[0], 1)
+    return (diff_array, map(frames.__getitem__, frame_indices))
 
   def ocrWithLocalMaxima(self, frames, reducer) -> array:
     '''
@@ -146,17 +146,16 @@ class ExtractSubtitles(BasicCvProcess):
     '''
     frame_list, frame_diffs = collect2(lambda it: (it, it.value), frames)
     self.onFrameList(frame_list)
-    diff_array = smooth(array(frame_diffs), self.window_size, self.window)
-    frame_indices = np.subtract(np.asarray(argrelextrema(diff_array, np.greater))[0], 1)
 
-    for frame in map(frame_list.__getitem__, frame_indices):
+    (report, valid_frames) = self.solveValidFrames(frame_list, frame_diffs)
+    for frame in valid_frames:
       if self.is_crop_debug:
         cv2.imshow(ExtractSubtitles.WIN_SUBTITLE_RECT, frame.img)
         cv2WaitKey()
       subtitle = self.recognizeText(frame)
       reducer.accept(frame, subtitle)
     reducer.finish()
-    return diff_array
+    return report
 
   class DefaultOcrFold(Reducer):
     def __init__(self, ctx, name, on_new_subtitle = print):
@@ -218,6 +217,7 @@ def makeArgumentParser():
     default=None, help="crop out subtitles area, improve recognition accuracy")
   apg.add_argument("-thres", metavar="x.x", type=float, default=None, help="add frame store for fixed threshold value")
   apg.add_argument("-lang", type=str, default="eng", help="OCR language for Tesseract `tesseract --list-langs`")
+  apg.add_argument("-filter-code", type=str, default="it", help="(it: cv2.UMat) pipe function")
 
   apg1 = app.add_argument_group("misc settings")
   apg1.add_argument("--crop-debug", action="store_true", help="show OpenCV GUI when processing")
@@ -230,7 +230,7 @@ def makeArgumentParser():
 def mkdirIfNotExists(self: Path):
   if not self.exists(): self.mkdir()
 
-def makeExtractor(cfg: Namespace):
+def makeExtractor(cfg: Namespace, cls_extract=ExtractSubtitles):
   lang, crop, crop_debug, thres, window, window_size, chunk_size, frames_dir = cfg.lang, cfg.crop, cfg.crop_debug, cfg.thres, cfg.window, cfg.window_size, cfg.chunk_size, cfg.frames_dir
   printAttributes(
     subtitle_language=lang,
@@ -241,7 +241,7 @@ def makeExtractor(cfg: Namespace):
     process_chunk_size=chunk_size,
     frame_directory=frames_dir
   )
-  extractor = ExtractSubtitles(lang, crop_debug, thres,
+  extractor = cls_extract(lang, crop_debug, thres,
     window, window_size, chunk_size, also(mkdirIfNotExists, Path(frames_dir)) )
   if cfg.use_progress: #< assign extra config
     USE_FEATURE.add(FEAT_PROGRESS)
@@ -249,11 +249,19 @@ def makeExtractor(cfg: Namespace):
     USE_FEATURE.add(FEAT_DEBUG)
   return extractor
 
+class EvalFilterExtractSubtitle(ExtractSubtitles):
+  def __init__(self, *args, filter_code = "it"):
+    ''' filter_code: Python expr about `(it: cv2.UMat)` results `cv2.UMat` '''
+    super().__init__(*args)
+    self.mat_filter = eval(compile(f"lambda it: {filter_code}", "<frame_filter>", "eval"))
+  def postprocessUMat(self, mat):
+    return self.mat_filter(mat)
+
 # == Entry ==
 def main(args):
   app = makeArgumentParser()
   cfg = app.parse_args(args)
-  extractor = makeExtractor(cfg)
+  extractor = makeExtractor(cfg, cls_extract=lambda *args: EvalFilterExtractSubtitle(*args, filter_code=cfg.filter_code))
   for video_path in map(lambda it: it.name, cfg.video):
     video_name = Path(video_path).name
     printAttributes(video_path=video_path)
