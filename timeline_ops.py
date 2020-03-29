@@ -43,17 +43,18 @@ def mergeDebug(path):
     v = stringSimilarity(sa, sb)
     print(f"{ta}-{tb} {str(v)[0:4].ljust(4, '0')} {sa} | {sb}")
 
-def merge(path, strsim_bound_max):
+def merge(path, strsim_bound_max, consume = print):
   bound_max = float(strsim_bound_max)
-  last_text = ""
-  start, end = 0, 0
+  (last_text, start, end) = ("", 0, 0)
+  onConsume = lambda: consume(Record(start, end, last_text))
   for (time, text) in openTimeline(path):
     if stringSimilarity(last_text, text) < bound_max:
       last_text = text
       end = time #< renew end
     else:
-      print(Record(start, end, last_text))
-      last_text, start, end = text, time, time
+      onConsume()
+      (last_text, start, end) = (text, time, time)
+  onConsume()
 
 lines = lambda s: iter(s.readline, "")
 

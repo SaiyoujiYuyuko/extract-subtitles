@@ -28,7 +28,7 @@ from pytesseract import image_to_string
 
 import numpy as np
 from numpy import array, concatenate
-from scipy.signal import argrelextrema
+from scipy import signal
 
 import matplotlib.pyplot as plot
 
@@ -36,6 +36,7 @@ import matplotlib.pyplot as plot
 USE_FEATURE = set([])
 FEAT_DEBUG = "--debug"
 FEAT_PROGRESS = "--use-progress"
+FEAT_SHARP = "--use-sharp"
 NOT_COMMON_PUNTUATION = "#$%&\\()*+-/:;<=>@[]^_`{|}" + "—»™€°"
 
 feats = USE_FEATURE.__contains__
@@ -67,7 +68,7 @@ class ExtractSubtitles(BasicCvProcess):
   '''
   Operation of extracting video subtitle area as text,
   - configurable: `cropUMat`, `postprocessUMat`, `onFrameList`, `subtitleShouledReplace`, `postpreocessSubtitle`
-  - workflow: `runOn`, `solveFrameDifferences`, `solveValidFrames`, `onFrameList`, `ocrWithLocalMaxima`
+  - workflow: `runOn`, `solveFrameDifferences`, `findPeaks`, `onFrameList`, `ocrWithLocalMaxima`
   '''
   WIN_LAST_IMAGE = "Last Image"
   WIN_LAST_FRAME = "Last Frame (processed image)"
@@ -136,12 +137,10 @@ class ExtractSubtitles(BasicCvProcess):
       reducer.accept(index)
     reducer.finish()
 
-  def solveValidFrames(self, frames, frame_diffs) -> Tuple[array, Iterator[UMat]]:
-    diff_array = smooth(array(frame_diffs), self.window_size, self.window)
-    indices = np.subtract(np.asarray(argrelextrema(diff_array, np.greater))[0], 1)
-    return (diff_array, map(frames.__getitem__, indices))
+  def postprocessDifferences(self, a: array) -> array: return smooth(a, self.window_size, self.window)
+  def findPeaks(self, a: array) -> array: return np.asarray(signal.argrelextrema(a, np.greater))[0] #< argrelextrema(_) always (x,)
 
-  def ocrWithLocalMaxima(self, frames, reducer) -> array:
+  def ocrWithLocalMaxima(self, frames, reducer) -> Tuple[array, array]:
     '''
     - frames: chunked processing using window, reducing memory usage
     - reducer: accept (frame, subtitle)
@@ -149,15 +148,16 @@ class ExtractSubtitles(BasicCvProcess):
     frame_list, frame_diffs = collect2(lambda it: (it, it.value), frames)
     self.onFrameList(frame_list)
 
-    (report, valid_frames) = self.solveValidFrames(frame_list, frame_diffs)
-    for frame in valid_frames:
+    diff_array = self.postprocessDifferences(array(frame_diffs))
+    valid_indices = self.findPeaks(diff_array)
+    for frame in map(frame_list.__getitem__, valid_indices):
       if self.is_crop_debug:
         cv2.imshow(ExtractSubtitles.WIN_SUBTITLE_RECT, frame.img)
         cv2WaitKey()
       subtitle = self.recognizeText(frame)
       reducer.accept(frame, subtitle)
     reducer.finish()
-    return report
+    return (diff_array, valid_indices)
 
   class DefaultOcrFold(Reducer):
     def __init__(self, ctx, name, on_new_subtitle = print):
@@ -177,7 +177,7 @@ class ExtractSubtitles(BasicCvProcess):
     def finishAll(self):
       for f in self.files: f.close()
 
-  def runOn(self, cap: VideoCapture, crop: Rect, fold = DefaultOcrFold, name = "default") -> array:
+  def runOn(self, cap: VideoCapture, crop: Rect, fold = DefaultOcrFold, name = "default") -> Tuple[array, array]:
     '''
     - cap: video input
     - crop: Rect area for lyric graphics
@@ -187,11 +187,17 @@ class ExtractSubtitles(BasicCvProcess):
     reducer = fold(self, name)
     processChunk = lambda it: self.ocrWithLocalMaxima(it, reducer)
     diff_array_parts = map(processChunk, chunked(self.chunk_size, frames))
-    diff_array = reduce(lambda a, b: concatenate(array([a, b])), diff_array_parts)
+    def concatResults(a, b) -> Tuple[array, array]:
+      a0, a1 = a
+      b0, b1 = b
+      ab0 = concatenate(array([a0, b0]))
+      ab1 = concatenate(array([a1, b1+len(a0)]))
+      return (ab0, ab1)
+    (diff_array, indices) = reduce(concatResults, diff_array_parts)
 
     reducer.finishAll()
     cv2.destroyAllWindows()
-    return diff_array
+    return (diff_array, indices)
 
   def writeFramesThresholded(self, frames):
     for (a, b) in zipWithNext(frames):
@@ -201,12 +207,13 @@ class ExtractSubtitles(BasicCvProcess):
       printDebug(f"[{b.no}]({k_change}) prev: {a.value}, curr: {b.value}")
       cv2.imwrite(self.frameFilepath(a), a.img)
 
-  def drawPlot(self, diff_array):
+  def drawPlot(self, diff_array, indices):
     fig_diff = plot.figure(figsize=(40, 20))
-    plot.locator_params(100)
-    plot.stem(diff_array, use_line_collection=True)
     plot.xlabel("Frame.no")
     plot.ylabel("differences")
+    plot.locator_params(100)
+    plot.stem(diff_array, linefmt=":", use_line_collection=True)
+    plot.stem(indices, [diff_array[i] for i in indices], use_line_collection=True)
     return fig_diff
 
 
@@ -228,6 +235,7 @@ def makeArgumentParser():
   apg1 = app.add_argument_group("misc settings")
   apg1.add_argument("--crop-debug", action="store_true", help="show OpenCV GUI when processing")
   apg1.add_argument("--draw-plot", action="store_true", help="draw difference plot for statics")
+  apg1.add_argument(FEAT_SHARP, action="store_true", help="use non-smooth differential (improve for timeline, slower)")
   apg1.add_argument(FEAT_PROGRESS, action="store_true", help="show progress bar")
   apg1.add_argument(FEAT_DEBUG, action="store_true", help="print debug info")
   BasicCvProcess.registerArguments(apg1)
@@ -247,12 +255,15 @@ def makeExtractor(cfg: Namespace, cls_extract=ExtractSubtitles):
     process_chunk_size=chunk_size,
     frame_directory=frames_dir
   )
-  extractor = cls_extract(lang, crop_debug, save_thres,
-    window, window_size, chunk_size, also(mkdirIfNotExists, Path(frames_dir)) )
-  if cfg.use_progress: #< assign extra config
+  if cfg.use_sharp: #< assign extra config
+    USE_FEATURE.add(FEAT_SHARP)
+  if cfg.use_progress:
     USE_FEATURE.add(FEAT_PROGRESS)
   if cfg.debug:
     USE_FEATURE.add(FEAT_DEBUG)
+
+  extractor = cls_extract(lang, crop_debug, save_thres,
+    window, window_size, chunk_size, also(mkdirIfNotExists, Path(frames_dir)) )
   return extractor
 
 class EvalFilterExtractSubtitle(ExtractSubtitles):
@@ -260,8 +271,11 @@ class EvalFilterExtractSubtitle(ExtractSubtitles):
     ''' filter_code: Python expr about `(it: cv2.UMat)` results `cv2.UMat` '''
     super().__init__(*args)
     self.mat_filter = eval(compile(f"lambda it: {filter_code}", "<frame_filter>", "eval"))
+    self.is_sharp = feats(FEAT_SHARP)
   def postprocessUMat(self, mat):
     return self.mat_filter(mat)
+  def postprocessDifferences(self, a) -> array:
+    return (a if self.is_sharp else super().postprocessDifferences(a))
 
 # == Entry ==
 def main(args):
@@ -275,10 +289,11 @@ def main(args):
 
     capture = VideoCapture(video_path)
     printAttributes(video_props=cv2VideoProps(capture))
-    diff_array = extractor.runOn(capture, let(lambda it: Rect(*it[0], *it[1]), cfg.crop), name=video_name)
+    (diff_array, indices) = extractor.runOn(capture, let(lambda it: Rect(*it[0], *it[1]), cfg.crop), name=video_name)
     capture.release()
     if cfg.draw_plot:
-      fig_diff = extractor.drawPlot(diff_array)
+      fig_diff = extractor.drawPlot(diff_array, indices)
+      print(indices)
       plot.title(f"Filtered differential sum for {video_name}")
       plot.show()
       fig_diff.savefig(cfg.frames_dir/f"plot_{video_name}.png")
