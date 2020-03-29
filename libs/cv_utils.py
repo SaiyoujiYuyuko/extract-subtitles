@@ -61,6 +61,15 @@ def smooth(a: array, window_size: int, window = "hanning") -> array:
   y = convolve(w / w.sum(), s, mode="same")
   return y[window_size -1 : -window_size +1]
 
+def cvScale(mat: UMat, k_x, k_y) -> UMat:
+  return cv2.resize(mat, None, fx=k_x, fy=k_y, interpolation=cv2.INTER_AREA)
+
+def cvGrayscale(mat: UMat) -> UMat:
+  return cv2.cvtColor(mat, cv2.COLOR_BGR2GRAY)
+
+def cvBlur(mat: UMat, n = 9) -> UMat:
+  return cv2.GaussianBlur(mat, (n, n), 0.0)
+
 class BasicCvProcess:
   ''' Helper class for simple CV programs (window+size, chunk_size, path_frames) '''
   def __init__(self, window: str, window_size: int, chunk_size: int, path_frames: Path):

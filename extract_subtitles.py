@@ -20,6 +20,7 @@ from libs.fun_utils import Reducer, AsNoOp
 from libs.cv_utils import Frame, Rect, BasicCvProcess
 from libs.cv_utils import smooth as orig_smooth, relativeChange, stringSimilarity
 from libs.cv_utils import cv2VideoProps, cv2NormalWin, cv2WaitKey
+from libs.cv_utils import cvScale, cvBlur, cvGrayscale
 
 import cv2
 from cv2 import UMat, VideoCapture
@@ -49,6 +50,9 @@ def smooth(a, window_size, window) -> array:
   printDebug(f"smooth [...x{len(a)}], {window_size} {window}")
   return orig_smooth(a, window_size, window)
 
+def cvInGrayRange(img: UMat, start: int, end: int) -> UMat:
+  return cv2.inRange(img, (start,start,start), (end,end,end))
+
 class AsProgress(Reducer):
   def __init__(self, cap: VideoCapture, crop):
     n_frame = int(cv2VideoProps(cap)[0])
@@ -63,38 +67,50 @@ class ExtractSubtitles(BasicCvProcess):
   '''
   Operation of extracting video subtitle area as text,
   - configurable: `cropUMat`, `postprocessUMat`, `onFrameList`, `subtitleShouledReplace`, `postpreocessSubtitle`
-  - workflow: `runOn`, `solveFrameDifferences`, `onFrameList`, `ocrWithLocalMaxima`
+  - workflow: `runOn`, `solveFrameDifferences`, `solveValidFrames`, `onFrameList`, `ocrWithLocalMaxima`
   '''
   WIN_LAST_IMAGE = "Last Image"
   WIN_LAST_FRAME = "Last Frame (processed image)"
   WIN_SUBTITLE_RECT = "Subtitle Rect"
 
-  def __init__(self, lang: str, is_crop_debug: bool, diff_thres: float, window, window_size, chunk_size, path_frames):
+  def __init__(self, lang: str, is_crop_debug: bool, diff_save_thres: float, window, window_size, chunk_size, path_frames):
     '''
     - lang: language for Tesseract OCR
     - is_crop_debug: show OpenCV capture GUI when processing
-    - diff_thres: threshold for differental frame dropper
+    - diff_save_thres: save threshold for differential frame dropper
     - window: windowing kind
     - window_size: window size for numpy algorithms
     - chunk_size: processing chunk size for `ocrWithLocalMaxima()`
     - path_frames: temporary path for frame files
     '''
-    self.lang, self.is_crop_debug, self.diff_thres = lang, is_crop_debug, diff_thres
+    self.lang, self.is_crop_debug, self.diff_save_thres = lang, is_crop_debug, diff_save_thres
     super().__init__(window, window_size, chunk_size, path_frames)
 
   def cropUMat(self, mat: UMat, crop: Rect) -> UMat:
-    if crop != None:
-      croped_img = crop.sliceUMat(mat)
-      if self.is_crop_debug:
-        cv2.imshow(ExtractSubtitles.WIN_SUBTITLE_RECT, croped_img)
-        cv2WaitKey()
-      return croped_img
-    else: return mat
+    if crop == None: return mat
+    cropped_img = crop.sliceUMat(mat)
+    if self.is_crop_debug:
+      cv2.imshow(ExtractSubtitles.WIN_SUBTITLE_RECT, cropped_img)
+      cv2WaitKey()
+    return cropped_img
 
-  def postprocessUMat(self, mat: UMat) -> UMat:
-    return mat #cv2.cvtColor(mat, cv2.COLOR_BGR2LUV)
+  def postprocessUMat(self, mat: UMat) -> UMat: return mat
+
+  def recognizeText(self, frame: Frame) -> str:
+    return image_to_string(frame.img, self.lang)
+
+  #v frame & subtitles
+  def onFrameList(self, frames):
+    if self.diff_save_thres != None: self.writeFramesThresholded(frames)
+
+  def subtitleShouldReplace(self, a, b) -> bool:
+    return b != a and b.count("\n") == 0 and stringSimilarity(a, b) > (1/4)
+
+  def postprocessSubtitle(self, text) -> str:
+    return stripAll(NOT_COMMON_PUNTUATION, text)
 
   def solveFrameDifferences(self, cap: VideoCapture, crop: Rect, fold) -> Iterator[Frame]:
+    require(cap.isOpened(), "failed to open capture")
     postprocess = lambda mat: self.postprocessUMat(self.cropUMat(mat, crop))
     if self.is_crop_debug:
       cv2NormalWin(ExtractSubtitles.WIN_LAST_IMAGE)
@@ -112,7 +128,7 @@ class ExtractSubtitles(BasicCvProcess):
         cv2.imshow(ExtractSubtitles.WIN_LAST_FRAME, curr_frame) #< must have single title, to animate
         if cv2WaitKey() == 'q': break
       if curr_frame is not None: # and prev_frame is not None
-        diff = cv2.absdiff(curr_frame, prev_frame) #< main logic goes here
+        diff = cv2.absdiff(curr_frame, prev_frame) #< main algorithm goes here
         yield Frame(index, curr_frame, np.sum(diff))
       prev_frame = curr_frame
       unfinished, img = cap.read()
@@ -120,24 +136,10 @@ class ExtractSubtitles(BasicCvProcess):
       reducer.accept(index)
     reducer.finish()
 
-  def writeFramesThresholded(self, frames):
-    for (a, b) in zipWithNext(frames):
-      if b.value == 0: continue #< what if no motion between (last-1)&last ?
-      k_change = relativeChange(np.float(a.value), np.float(b.value))
-      if k_change < self.diff_thres: continue
-      printDebug(f"[{b.no}]({k_change}) prev: {a.value}, curr: {b.value}")
-      cv2.imwrite(self.frameFilepath(a), a.img)
-
-  def recognizeText(self, frame: Frame) -> str:
-    return image_to_string(frame.img, self.lang)
-
-  def onFrameList(self, frames):
-    if self.diff_thres != None: self.writeFramesThresholded(frames)
-
   def solveValidFrames(self, frames, frame_diffs) -> Tuple[array, Iterator[UMat]]:
     diff_array = smooth(array(frame_diffs), self.window_size, self.window)
-    frame_indices = np.subtract(np.asarray(argrelextrema(diff_array, np.greater))[0], 1)
-    return (diff_array, map(frames.__getitem__, frame_indices))
+    indices = np.subtract(np.asarray(argrelextrema(diff_array, np.greater))[0], 1)
+    return (diff_array, map(frames.__getitem__, indices))
 
   def ocrWithLocalMaxima(self, frames, reducer) -> array:
     '''
@@ -175,12 +177,6 @@ class ExtractSubtitles(BasicCvProcess):
     def finishAll(self):
       for f in self.files: f.close()
 
-  def subtitleShouldReplace(self, a, b) -> bool:
-    return b != a and b.count("\n") == 0 and stringSimilarity(a, b) > (1/4)
-
-  def postprocessSubtitle(self, text) -> str:
-    return stripAll(NOT_COMMON_PUNTUATION, text)
-
   def runOn(self, cap: VideoCapture, crop: Rect, fold = DefaultOcrFold, name = "default") -> array:
     '''
     - cap: video input
@@ -197,10 +193,20 @@ class ExtractSubtitles(BasicCvProcess):
     cv2.destroyAllWindows()
     return diff_array
 
+  def writeFramesThresholded(self, frames):
+    for (a, b) in zipWithNext(frames):
+      if b.value == 0: continue #< what if no motion between (last-1)&last ?
+      k_change = relativeChange(np.float(a.value), np.float(b.value))
+      if k_change < self.diff_save_thres: continue
+      printDebug(f"[{b.no}]({k_change}) prev: {a.value}, curr: {b.value}")
+      cv2.imwrite(self.frameFilepath(a), a.img)
+
   def drawPlot(self, diff_array):
     fig_diff = plot.figure(figsize=(40, 20))
     plot.locator_params(100)
     plot.stem(diff_array, use_line_collection=True)
+    plot.xlabel("Frame.no")
+    plot.ylabel("differences")
     return fig_diff
 
 
@@ -215,9 +221,9 @@ def makeArgumentParser():
   apg.add_argument("-crop", metavar="(x,y)(w,h)",
     type=PatternType(r"\((\d+),(\d+)\)", toMapper(int)),
     default=None, help="crop out subtitles area, improve recognition accuracy")
-  apg.add_argument("-thres", metavar="x.x", type=float, default=None, help="add frame store for fixed threshold value")
-  apg.add_argument("-lang", type=str, default="eng", help="OCR language for Tesseract `tesseract --list-langs`")
   apg.add_argument("-filter-code", type=str, default="it", help="(it: cv2.UMat) pipe function")
+  apg.add_argument("-lang", type=str, default="eng", help="OCR language for Tesseract `tesseract --list-langs`")
+  apg.add_argument("-save-thres", metavar="x.x", type=float, default=None, help="add frame store for fixed save threshold value")
 
   apg1 = app.add_argument_group("misc settings")
   apg1.add_argument("--crop-debug", action="store_true", help="show OpenCV GUI when processing")
@@ -231,17 +237,17 @@ def mkdirIfNotExists(self: Path):
   if not self.exists(): self.mkdir()
 
 def makeExtractor(cfg: Namespace, cls_extract=ExtractSubtitles):
-  lang, crop, crop_debug, thres, window, window_size, chunk_size, frames_dir = cfg.lang, cfg.crop, cfg.crop_debug, cfg.thres, cfg.window, cfg.window_size, cfg.chunk_size, cfg.frames_dir
+  lang, crop, crop_debug, save_thres, window, window_size, chunk_size, frames_dir = cfg.lang, cfg.crop, cfg.crop_debug, cfg.save_thres, cfg.window, cfg.window_size, cfg.chunk_size, cfg.frames_dir
   printAttributes(
     subtitle_language=lang,
     crop=crop,
-    threshold=thres,
+    save_threshold=save_thres,
     filter_window=window,
     filter_window_size=window_size,
     process_chunk_size=chunk_size,
     frame_directory=frames_dir
   )
-  extractor = cls_extract(lang, crop_debug, thres,
+  extractor = cls_extract(lang, crop_debug, save_thres,
     window, window_size, chunk_size, also(mkdirIfNotExists, Path(frames_dir)) )
   if cfg.use_progress: #< assign extra config
     USE_FEATURE.add(FEAT_PROGRESS)
@@ -273,6 +279,7 @@ def main(args):
     capture.release()
     if cfg.draw_plot:
       fig_diff = extractor.drawPlot(diff_array)
+      plot.title(f"Filtered differential sum for {video_name}")
       plot.show()
       fig_diff.savefig(cfg.frames_dir/f"plot_{video_name}.png")
 
