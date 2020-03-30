@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 
-from typing import Tuple, List, Iterator
+from typing import Tuple
 from re import findall
 
 SEC_MS = 1000
@@ -27,9 +27,9 @@ def makeConvertorFps2Ms(fps):
   return lambda no: (float(no) / fps) * SEC_MS
 
 
-def millis2LrcTime(ms, ms_sep = ".") -> str:
+def millis2LrcTime(ms) -> str:
   mins, secs, r = millis2MinSecMs(ms)
-  return f"{time_just(mins)}:{time_just(secs)}{ms_sep}{int(r)}"
+  return f"{time_just(mins)}:{time_just(secs)}.{int(r)}"
 
 def dumpsLrc(ms, text) -> str:
   return f"[{millis2LrcTime(ms)}] {text}"

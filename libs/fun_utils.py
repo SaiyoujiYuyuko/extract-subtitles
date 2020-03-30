@@ -1,9 +1,8 @@
-from typing import Callable, TypeVar, Generic, Any, NewType
+from typing import Callable, TypeVar, Generic, Any
 from typing import Iterable, Iterator, List, Tuple, Dict
-from typing import MappingView
 
 from re import findall
-from itertools import chain, islice
+from itertools import chain, repeat, islice
 from sys import stderr
 
 T = TypeVar("T")
@@ -48,6 +47,16 @@ def collect2(selector2: Callable[[T], Tuple[R, R]], xs: Iterable[T]) -> Tuple[Li
     bs.append(b); cs.append(c)
   return (bs, cs)
 
+def expandRangeStartList(size, entries, key = lambda it: it[0], value = lambda it: it[1]):
+  sorted_entries = sorted(entries, key=key)
+  items = list(repeat(None, size))
+  def assignRange(start, stop, value):
+    items[start:stop] = repeat(value, stop - start)
+  for (a, b) in zipWithNext(sorted_entries):
+    assignRange(key(a), key(b), value(a))
+  last_item = sorted_entries[-1]
+  assignRange(key(last_item), size, value(last_item))
+  return items
 
 class PatternType:
   def __init__(self, regex, transform = identity):
