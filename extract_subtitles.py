@@ -1,11 +1,10 @@
 #!/bin/env python3
 # -*- coding: utf-8 -*-
 
-from typing import Tuple, Iterator
+from typing import Tuple, List, Iterator
 
 from argparse import ArgumentParser, Namespace, FileType
 from pathlib import Path
-from os import remove
 from sys import argv, stderr
 from functools import reduce
 from progressbar import ProgressBar
@@ -13,7 +12,7 @@ from progressbar import ProgressBar
 from json import dumps
 
 from libs.fun_utils import let, also, require
-from libs.fun_utils import zipWithNext, chunked, collect2
+from libs.fun_utils import zipWithNext, chunked, collect2, expandRangeStartList
 from libs.fun_utils import PatternType, toMapper, printAttributes
 from libs.fun_utils import Reducer, AsNoOp
 
@@ -56,7 +55,7 @@ def cvInGrayRange(img: UMat, start: int, end: int) -> UMat:
 
 class AsProgress(Reducer):
   def __init__(self, cap: VideoCapture, crop):
-    n_frame = int(cv2VideoProps(cap)[0])
+    n_frame = cv2VideoProps(cap)[0]
     self.progress = ProgressBar(maxval=n_frame).start()
   def accept(self, index):
     self.progress.update(index)
@@ -87,15 +86,15 @@ class ExtractSubtitles(BasicCvProcess):
     self.lang, self.is_crop_debug, self.diff_save_thres = lang, is_crop_debug, diff_save_thres
     super().__init__(window, window_size, chunk_size, path_frames)
 
-  def cropUMat(self, mat: UMat, crop: Rect) -> UMat:
+  def cropUMat(self, mat: UMat, crop: List[Rect], index: int) -> UMat:
     if crop == None: return mat
-    cropped_img = crop.sliceUMat(mat)
+    cropped_img = crop[0].sliceUMat(mat)
     if self.is_crop_debug:
       cv2.imshow(ExtractSubtitles.WIN_SUBTITLE_RECT, cropped_img)
       cv2WaitKey()
     return cropped_img
 
-  def postprocessUMat(self, mat: UMat) -> UMat: return mat
+  def postprocessUMat(self, mat: UMat, index: int) -> UMat: return mat
 
   def recognizeText(self, frame: Frame) -> str:
     return image_to_string(frame.img, self.lang)
@@ -110,9 +109,9 @@ class ExtractSubtitles(BasicCvProcess):
   def postprocessSubtitle(self, text) -> str:
     return stripAll(NOT_COMMON_PUNTUATION, text)
 
-  def solveFrameDifferences(self, cap: VideoCapture, crop: Rect, fold) -> Iterator[Frame]:
+  def solveFrameDifferences(self, cap: VideoCapture, crop: List[Rect], fold) -> Iterator[Frame]:
     require(cap.isOpened(), "failed to open capture")
-    postprocess = lambda mat: self.postprocessUMat(self.cropUMat(mat, crop))
+    postprocess = lambda mat, index: self.postprocessUMat(self.cropUMat(mat, crop, index), index)
     if self.is_crop_debug:
       cv2NormalWin(ExtractSubtitles.WIN_LAST_IMAGE)
       cv2NormalWin(ExtractSubtitles.WIN_LAST_FRAME)
@@ -121,16 +120,18 @@ class ExtractSubtitles(BasicCvProcess):
     index = 0
     prev_frame, curr_frame = None, None
     unfinished, img = cap.read()
-    prev_frame = postprocess(img) #< initial (prev == curr)
+    prev_frame = postprocess(img, 0) #< initial (prev == curr)
     while unfinished:
-      curr_frame = postprocess(img)
+      curr_frame = postprocess(img, index)
       if self.is_crop_debug:
         cv2.imshow(ExtractSubtitles.WIN_LAST_IMAGE, img)
         cv2.imshow(ExtractSubtitles.WIN_LAST_FRAME, curr_frame) #< must have single title, to animate
         if cv2WaitKey() == 'q': break
       if curr_frame is not None: # and prev_frame is not None
-        diff = cv2.absdiff(curr_frame, prev_frame) #< main algorithm goes here
-        yield Frame(index, curr_frame, np.sum(diff))
+        try:
+          diff = cv2.absdiff(curr_frame, prev_frame) #< main algorithm goes here
+          yield Frame(index, curr_frame, np.sum(diff))
+        except cv2.error: pass
       prev_frame = curr_frame
       unfinished, img = cap.read()
       index = index + 1
@@ -177,7 +178,7 @@ class ExtractSubtitles(BasicCvProcess):
     def finishAll(self):
       for f in self.files: f.close()
 
-  def runOn(self, cap: VideoCapture, crop: Rect, fold = DefaultOcrFold, name = "default") -> Tuple[array, array]:
+  def runOn(self, cap: VideoCapture, crop: List[Rect], fold = DefaultOcrFold, name = "default") -> Tuple[array, array]:
     '''
     - cap: video input
     - crop: Rect area for lyric graphics
@@ -225,8 +226,8 @@ def makeArgumentParser():
 
   apg = app.add_argument_group("basic workflow")
   apg.add_argument("video", nargs="+", type=FileType("r"), help="source file to extract from")
-  apg.add_argument("-crop", metavar="(x,y)(w,h)",
-    type=PatternType(r"\((\d+),(\d+)\)", toMapper(int)),
+  apg.add_argument("-crop", metavar="frame(x,y)[w,h]",
+    type=PatternType(r"(\d+)\((\d+),(\d+)\)\[(\d+),(\d+)\]", toMapper(int)),
     default=None, help="crop out subtitles area, improve recognition accuracy")
   apg.add_argument("-filter-code", type=str, default="it", help="(it: cv2.UMat) pipe function")
   apg.add_argument("-lang", type=str, default="eng", help="OCR language for Tesseract `tesseract --list-langs`")
@@ -244,7 +245,7 @@ def makeArgumentParser():
 def mkdirIfNotExists(self: Path):
   if not self.exists(): self.mkdir()
 
-def makeExtractor(cfg: Namespace, cls_extract=ExtractSubtitles):
+def makeExtractor(cfg: Namespace, cls_extract=ExtractSubtitles) -> ExtractSubtitles:
   lang, crop, crop_debug, save_thres, window, window_size, chunk_size, frames_dir = cfg.lang, cfg.crop, cfg.crop_debug, cfg.save_thres, cfg.window, cfg.window_size, cfg.chunk_size, cfg.frames_dir
   printAttributes(
     subtitle_language=lang,
@@ -270,26 +271,41 @@ class EvalFilterExtractSubtitle(ExtractSubtitles):
   def __init__(self, *args, filter_code = "it"):
     ''' filter_code: Python expr about `(it: cv2.UMat)` results `cv2.UMat` '''
     super().__init__(*args)
-    self.mat_filter = eval(compile(f"lambda it: {filter_code}", "<frame_filter>", "eval"))
+    self.mat_filter = eval(compile(f"lambda it, i: {filter_code}", "<frame_filter>", "eval"))
     self.is_sharp = feats(FEAT_SHARP)
-  def postprocessUMat(self, mat):
-    return self.mat_filter(mat)
+  def postprocessUMat(self, mat, index):
+    return self.mat_filter(mat, index)
   def postprocessDifferences(self, a) -> array:
     return (a if self.is_sharp else super().postprocessDifferences(a))
+
+class CropEvalFilterExtractSubtitle(EvalFilterExtractSubtitle):
+  def cropUMat(self, mat, crop, index) -> UMat:
+    cropped_img = crop[index].sliceUMat(mat)
+    if self.is_crop_debug:
+      cv2.imshow(ExtractSubtitles.WIN_SUBTITLE_RECT, cropped_img)
+      cv2WaitKey()
+    return cropped_img
 
 # == Entry ==
 def main(args):
   app = makeArgumentParser()
   cfg = app.parse_args(args)
-  extractor = makeExtractor(cfg, cls_extract=lambda *args: EvalFilterExtractSubtitle(*args, filter_code=cfg.filter_code))
+  cls_extract = lambda *args: (EvalFilterExtractSubtitle if cfg.crop == None or len(cfg.crop) <= 1 else CropEvalFilterExtractSubtitle) (*args, filter_code=cfg.filter_code)
+  extractor = makeExtractor(cfg, cls_extract=cls_extract)
   for video_path in map(lambda it: it.name, cfg.video):
     video_name = Path(video_path).name
     printAttributes(video_path=video_path)
     print("Extracting key frames...")
 
     capture = VideoCapture(video_path)
-    printAttributes(video_props=cv2VideoProps(capture))
-    (diff_array, indices) = extractor.runOn(capture, let(lambda it: Rect(*it[0], *it[1]), cfg.crop), name=video_name)
+    n_frames, fps, w, h = cv2VideoProps(capture)
+    printAttributes(video_playback=(n_frames, fps), video_dimens=(w, h))
+
+    #v [(t, x,y, w,h), ...]
+    key = lambda it: it[0]; makeRect = lambda it: Rect(*it[1:])
+    crops = let(lambda t: [makeRect(t[0])] if len(t) == 1 else expandRangeStartList(n_frames, t, key=key, value=makeRect), cfg.crop)
+    if crops != None: require(crops[0] != None, "first crop area must started at frame 0") #< only when multi-crop enabled
+    (diff_array, indices) = extractor.runOn(capture, crops, name=video_name)
     capture.release()
     if cfg.draw_plot:
       fig_diff = extractor.drawPlot(diff_array, indices)

@@ -47,7 +47,7 @@ def collect2(selector2: Callable[[T], Tuple[R, R]], xs: Iterable[T]) -> Tuple[Li
     bs.append(b); cs.append(c)
   return (bs, cs)
 
-def expandRangeStartList(size, entries, key = lambda it: it[0], value = lambda it: it[1]):
+def expandRangeStartList(size: int, entries: T, key: Callable[[T], int] = lambda it: it[0], value: Callable[[T], V] = lambda it: it[1]) -> List[V]:
   sorted_entries = sorted(entries, key=key)
   items = list(repeat(None, size))
   def assignRange(start, stop, value):

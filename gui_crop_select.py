@@ -72,5 +72,6 @@ if __name__ == "__main__":
     cap = VideoCapture(path)
     crops = selectCropRects(cap)
     for i, c in crops:
-      print(f"{i} " + f"{c[0:2]}{c[2:4]}".replace(" ", ""))
+      (x,y, w,h) = c
+      print(f"{i}({x},{y})[{w},{h}]")
     cap.release()

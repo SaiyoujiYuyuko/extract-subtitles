@@ -1,4 +1,4 @@
-from typing import Tuple
+from typing import cast, Tuple
 from pathlib import Path
 
 import cv2
@@ -25,10 +25,10 @@ def cv2NormalWin(title):
 def cv2WaitKey(delay_ms = 1) -> str:
   return chr(cv2.waitKey(delay_ms) & 0xFF)
 
-def cv2VideoProps(cap: VideoCapture) -> Tuple[int]:
+def cv2VideoProps(cap: VideoCapture) -> Tuple[int, int, int, int]:
   ''' (count, fps, width, height) '''
   props = (CAP_PROP_FRAME_COUNT, CAP_PROP_FPS, CAP_PROP_FRAME_WIDTH, CAP_PROP_FRAME_HEIGHT)
-  return tuple(map(int, map(cap.get, props)))
+  return cast(Tuple, tuple(map(int, map(cap.get, props))))
 
 class Rect:
   def __init__(self, x,y, w,h):
