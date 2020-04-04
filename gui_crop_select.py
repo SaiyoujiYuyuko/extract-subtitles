@@ -1,7 +1,7 @@
 #!/bin/env python3
 # -*- coding: utf-8 -*-
 
-from typing import Tuple, Iterator, cast
+from typing import Optional, Tuple, Iterator, cast
 
 from argparse import ArgumentParser, FileType
 
@@ -9,6 +9,7 @@ from cv2 import VideoCapture, UMat, imshow, rectangle
 from cv2 import namedWindow, destroyWindow, WINDOW_NORMAL
 from cv2 import setMouseCallback, waitKey
 from cv2 import EVENT_LBUTTONDOWN, EVENT_LBUTTONUP
+from cv2 import CAP_PROP_POS_FRAMES
 
 def cv2WaitKey(block_ms = 1) -> str:
   return chr(waitKey(block_ms) & 0xFF)
@@ -23,7 +24,7 @@ def cv2Crop(mat: UMat, ltrd) -> UMat:
   return mat[y:y+h, x:x+w]
 
 # == App ==
-def guiSelectionUMat(mat: UMat, title="Rect Selection (r:replot; c:OK)", box_color=(0xFF, 0x00, 0x00), thickness=3) -> Tuple[Tuple[int, int], Tuple[int, int]]:
+def guiSelectionUMat(mat: UMat, title="Rect Selection (r:replot; c:OK)", box_color=(0xFF, 0x00, 0x00), thickness=3) -> Optional[Tuple[Tuple[int, int], Tuple[int, int]]]:
   ''' (left_top, right_down) '''
   p_lt, p_rd = None, None
   shot = mat.copy()
@@ -46,20 +47,47 @@ def guiSelectionUMat(mat: UMat, title="Rect Selection (r:replot; c:OK)", box_col
     elif key == 'r':
       shot = mat.copy()
       imshow(title, shot)
+    elif key == 'q':
+      return None
 
-def selectCropRects(cap: VideoCapture, title = "Video (c:OK; q:finished)", title_preview = "Preview") -> Iterator[Tuple[int, Tuple[int, int, int, int]]]:
+def selectCropRects(cap: VideoCapture, title = "Video (c:OK; q:finished, <:-; >:=)", title_preview = "Preview", d_seek=5) -> Iterator[Tuple[int, Tuple[int, int, int, int]]]:
   ''' position&size (x, y, w, h) '''
   index = 0
   ltrd = None
+  def seek(n):
+    nonlocal index
+    index += n
+    cap.set(CAP_PROP_POS_FRAMES, index)
+  def handleSeek(key):
+    if key == '-': seek(-d_seek)
+    elif key == '=': seek(+d_seek)
+  def handleSelect():
+    nonlocal ltrd
+    ltrd = guiSelectionUMat(img) or ltrd
+    if ltrd != None: return (index, rectLtrd2Xywh(*ltrd))
+
   unfinished, img = cap.read()
   while unfinished:
     imshow(title, img)
     if ltrd != None: imshow(title_preview, cv2Crop(img, ltrd))
     key = cv2WaitKey()
     if key == 'c':
-      ltrd = guiSelectionUMat(img)
-      yield (index, rectLtrd2Xywh(*ltrd))
+      select = handleSelect()
+      if select != None: yield select
     elif key == 'q': break
+
+    elif key in '-=': handleSeek(key)
+    elif key == ' ':
+      while True:
+        key1 = cv2WaitKey(0)
+        if key1 == ' ': break
+        elif key1 == 'c':
+          select = handleSelect()
+          if select != None: yield select          
+        elif key1 in "-=":
+          handleSeek(key1)
+          unfinished, img = cap.read()
+          imshow(title, img)
     unfinished, img = cap.read()
     index += 1
 
