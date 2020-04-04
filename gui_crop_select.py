@@ -63,8 +63,10 @@ def selectCropRects(cap: VideoCapture, title = "Video (c:OK; q:finished, <:-; >:
     elif key == '=': seek(+d_seek)
   def handleSelect():
     nonlocal ltrd
-    ltrd = guiSelectionUMat(img) or ltrd
-    if ltrd != None: return (index, rectLtrd2Xywh(*ltrd))
+    area = guiSelectionUMat(img)
+    if area != None:
+      ltrd = area
+      return (index, rectLtrd2Xywh(*ltrd))
   frame_ops = [lambda: seek(-1), lambda: seek(+1)]
 
   unfinished, img = cap.read()
