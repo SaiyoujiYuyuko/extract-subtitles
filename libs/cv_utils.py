@@ -43,8 +43,10 @@ class Frame:
   ''' Class to hold information about each frame '''
   def __init__(self, no, img, value):
     self.no, self.img, self.value = no, img, value
+  def __repr__(self): return f"Frame({self.no}, {self.value})"
   def __eq__(self, other): return self.no == other.no
   def __hash__(self): return hash(self.no)
+  def __lt__(self, other): return self.no < other.no
 
 
 smooth_supported_windows = ["flat", "hanning", "hamming", "bartlett", "blackman"]

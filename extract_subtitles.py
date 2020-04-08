@@ -6,6 +6,7 @@ from typing import Tuple, List, Iterator
 from argparse import ArgumentParser, Namespace, FileType
 from pathlib import Path
 from sys import argv, stderr
+from re import findall
 from functools import reduce
 from progressbar import ProgressBar
 
@@ -245,6 +246,7 @@ def makeArgumentParser():
   apg1.add_argument(FEAT_SHARP, action="store_true", help="use non-smooth differential (improve for timeline, slower)")
   apg1.add_argument(FEAT_PROGRESS, action="store_true", help="show progress bar")
   apg1.add_argument(FEAT_DEBUG, action="store_true", help="print debug info")
+  apg1.add_argument("--only-images", action="store_true", help="use frame images from --crop-debug as input")
   BasicCvProcess.registerArguments(apg1)
   return app
 
@@ -298,26 +300,48 @@ def main(args):
   cfg = app.parse_args(args)
   cls_extract = lambda *args: (EvalFilterExtractSubtitle if cfg.crop == None or len(cfg.crop) <= 1 else CropEvalFilterExtractSubtitle) (*args, filter_code=cfg.filter_code)
   extractor = makeExtractor(cfg, cls_extract=cls_extract)
-  for video_path in map(lambda it: it.name, cfg.video):
-    video_name = Path(video_path).name
-    printAttributes(video_path=video_path)
-    print("Extracting key frames...")
 
-    capture = VideoCapture(video_path)
-    n_frames, fps, w, h = cv2VideoProps(capture)
-    printAttributes(video_playback=(n_frames, fps), video_dimens=(w, h))
+  def drawPlot(diff_array, indices):
+    if not cfg.draw_plot: return
+    fig_diff = extractor.drawPlot(diff_array, indices)
+    print(indices)
+    plot.title(f"Filtered differential sum for {video_name}")
+    plot.show()
+    fig_diff.savefig(cfg.frames_dir/f"plot_{video_name}.png")
 
+  def makeCrops(n_frames):
     #v [(t, x,y, w,h), ...]
     key = lambda it: it[0]; makeRect = lambda it: Rect(*it[1:])
     crops = let(lambda t: [makeRect(t[0])] if len(t) == 1 else expandRangeStartList(n_frames, t, key=key, value=makeRect), cfg.crop)
-    if crops != None: require(crops[0] != None, "first crop area must started at frame 0") #< only when multi-crop enabled
-    (diff_array, indices) = extractor.runOn(capture, crops, name=video_name)
+    if crops != None: require(crops[0] != None, "first crop area must started at frame 0")
+    #^ only when multi-crop enabled
+    return crops
+
+  def readInt(s): return int(findall(r"(\d+)", s)[0])
+
+  pathes = map(lambda it: it.name, cfg.video)
+  if cfg.only_images:
+    extractor.postprocessDifferences = lambda diffs: diffs
+    extractor.findPeaks = lambda a: range(0, len(a)) #< required for smooth & peak estim. bypass
+    frames = sorted([Frame(readInt(path), cv2.imread(path), 0) for path in pathes])
+    print(array([it.no for it in frames])) #< NOTE: I don't know if len(sorted(a)) gets shorter second time access
+
+    reducer = ExtractSubtitles.DefaultOcrFold(extractor, "only_images")
+    _, indices = extractor.ocrWithLocalMaxima(frames, reducer)
+    reducer.finishAll()
+    cv2.destroyAllWindows()
+
+  for path in pathes:
+    video_name = Path(path).name
+    printAttributes(video_path=path)
+    print("Extracting key frames...")
+
+    capture = VideoCapture(path)
+    n_frames, fps, w, h = cv2VideoProps(capture)
+    printAttributes(video_playback=(n_frames, fps), video_dimens=(w, h))
+
+    (diff_array, indices) = extractor.runOn(capture, makeCrops(n_frames), name=video_name)
     capture.release()
-    if cfg.draw_plot:
-      fig_diff = extractor.drawPlot(diff_array, indices)
-      print(indices)
-      plot.title(f"Filtered differential sum for {video_name}")
-      plot.show()
-      fig_diff.savefig(cfg.frames_dir/f"plot_{video_name}.png")
+    drawPlot(diff_array, indices)
 
 if __name__ == "__main__": main(argv[1:]) #< no program name
