@@ -163,7 +163,9 @@ class ExtractSubtitles(BasicCvProcess):
   class DefaultOcrFold(Reducer):
     def __init__(self, ctx, name, on_new_subtitle = print):
       self.ctx = ctx; self.on_new_subtitle = on_new_subtitle
-      self.files = [(ctx.path_frames/f"{group}_{name}.txt").open("a+") for group in ["timeline", "loser"]]
+      self.path = self.ctx.path_frames/name
+      mkdirIfNotExists(self.path)
+      self.files = [(self.path/f"{group}.txt").open("a+") for group in ["timeline", "loser"]]
       self.out_timeline, self.out_lose_subtitle = self.files
       self.last_subtitle = ""
       self.frame_index = 0
@@ -175,7 +177,7 @@ class ExtractSubtitles(BasicCvProcess):
       else:
         self.out_lose_subtitle.write(f"{frame.no} {subtitle}\n")
       if self.ctx.is_crop_debug:
-        cv2.imwrite(str(self.ctx.path_frames/f"subtitle_{self.frame_index}.png"), frame.img)
+        cv2.imwrite(str(self.path/f"subtitle_{self.frame_index}.png"), frame.img)
       self.frame_index += 1
     def finish(self): #< in (single chunk) OCR
       for f in self.files: f.flush()
