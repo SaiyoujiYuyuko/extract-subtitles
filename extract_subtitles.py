@@ -151,11 +151,9 @@ class ExtractSubtitles(BasicCvProcess):
 
     diff_array = self.postprocessDifferences(array(frame_diffs))
     valid_indices = self.findPeaks(diff_array)
-    for index in valid_indices:
-      frame = frame_list[index]
+    for frame in map(frame_list.__getitem__, valid_indices):
       if self.is_crop_debug:
         cv2.imshow(ExtractSubtitles.WIN_SUBTITLE_RECT, frame.img)
-        cv2.imwrite(str(self.path_frames/f"subtitle_{index}.png"), frame.img)
         cv2WaitKey()
       subtitle = self.recognizeText(frame)
       reducer.accept(frame, subtitle)
@@ -168,6 +166,7 @@ class ExtractSubtitles(BasicCvProcess):
       self.files = [(ctx.path_frames/f"{group}_{name}.txt").open("a+") for group in ["timeline", "loser"]]
       self.out_timeline, self.out_lose_subtitle = self.files
       self.last_subtitle = ""
+      self.frame_index = 0
     def accept(self, frame, subtitle):
       self.out_timeline.write(f"{frame.no} {dumps(subtitle, ensure_ascii=False)}\n")
       if self.ctx.subtitleShouldReplace(self.last_subtitle, subtitle): #< check for repeated subtitles 
@@ -175,6 +174,9 @@ class ExtractSubtitles(BasicCvProcess):
         self.on_new_subtitle(frame.no, self.ctx.postprocessSubtitle(subtitle))
       else:
         self.out_lose_subtitle.write(f"{frame.no} {subtitle}\n")
+      if self.ctx.is_crop_debug:
+        cv2.imwrite(str(self.ctx.path_frames/f"subtitle_{self.frame_index}.png"), frame.img)
+      self.frame_index += 1
     def finish(self): #< in (single chunk) OCR
       for f in self.files: f.flush()
     def finishAll(self):
