@@ -151,9 +151,11 @@ class ExtractSubtitles(BasicCvProcess):
 
     diff_array = self.postprocessDifferences(array(frame_diffs))
     valid_indices = self.findPeaks(diff_array)
-    for frame in map(frame_list.__getitem__, valid_indices):
+    for index in valid_indices:
+      frame = frame_list[index]
       if self.is_crop_debug:
         cv2.imshow(ExtractSubtitles.WIN_SUBTITLE_RECT, frame.img)
+        cv2.imwrite(str(self.path_frames/f"subtitle_{index}.png"), frame.img)
         cv2WaitKey()
       subtitle = self.recognizeText(frame)
       reducer.accept(frame, subtitle)
