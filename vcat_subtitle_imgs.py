@@ -7,6 +7,17 @@ from PIL import Image as Pillow
 
 LTRD = NewType("LTRD", Tuple[int,int,int,int])
 
+def imagePixels(img):
+  for y in range(0, img.height):
+    for x in range(0, img.width):
+      yield img.getpixel((x, y))
+
+def channelHistogram(img):
+  n_channels = Pillow.getmodebands(img.mode)
+  hist = img.histogram()
+  return tuple(hist[i:i+256] for i in range(0, n_channels*256, 256))
+
+def count(xs): return sum(map(lambda _: 1, xs))
 
 
 def vConcateImages(path_imgs: Dict[str,Image]) -> Tuple[Image, Dict[str,LTRD]]:
@@ -34,7 +45,7 @@ from re import findall
 from json import dump, load
 def main(args):
   if len(args) == 0:
-    print("Usage: dst src... | unpack dst")
+    print("Usage: dst src... | unpack dst\n(ON_AREA_WROTE=lambda path, img: )")
     return
   if args[0] == "unpack":
     path = args[1]
@@ -48,18 +59,6 @@ def main(args):
     (img, areas) = vConcateImages({path: Pillow.open(path) for path in srcs})
     img.save(dst); dump(areas, open(f"{dst}.json", "w+"))
 
-def channelHistogram(img):
-  n_channels = Pillow.getmodebands(img.mode)
-  hist = img.histogram()
-  return tuple(hist[i:i+256] for i in range(0, n_channels*256, 256))
-
-def imagePixels(img):
-  for y in range(0, img.height):
-    for x in range(0, img.width):
-      yield img.getpixel((x, y))
-
-def count(xs): return sum(map(lambda _: 1, xs))
-
 import os
 def defaultOnAreaWrote(path, img, red_value_range=range(20, 100)):
   (r,g,b) = channelHistogram(img)[0:3]
@@ -67,11 +66,11 @@ def defaultOnAreaWrote(path, img, red_value_range=range(20, 100)):
   if redValue in red_value_range:
     redMarks = count(filter(lambda it: it[0:3] == (0xFF,0,0), imagePixels(img)))
     if not redMarks > 0: return
-    img.show()
+    img.show(title = f"Removed {path}")
     print(f"Removing {path} (redmarks {redMarks})")
     os.remove(path)
 
-onAreaWrote = eval("lambda path, img: " + (os.environ.get("AREA_WROTE") or "defaultOnAreaWrote(path, img)"))
+onAreaWrote = eval("lambda path, img: " + (os.environ.get("ON_AREA_WROTE") or "defaultOnAreaWrote(path, img)"))
 
 from sys import argv
 if __name__ == "__main__": main(argv[1:])
