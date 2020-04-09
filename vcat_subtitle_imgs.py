@@ -60,14 +60,13 @@ def main(args):
     img.save(dst); dump(areas, open(f"{dst}.json", "w+"))
 
 import os
-def defaultOnAreaWrote(path, img, red_value_range=range(20, 100)):
-  (r,g,b) = channelHistogram(img)[0:3]
-  redValue = r[0xFF] - (g[0xFF] + b[0xFF])
-  if redValue in red_value_range:
-    redMarks = count(filter(lambda it: it[0:3] == (0xFF,0,0), imagePixels(img)))
-    if not redMarks > 0: return
-    img.show(title = f"Removed {path}")
-    print(f"Removing {path} (redmarks {redMarks})")
+def defaultOnAreaWrote(path, img, mark_range=range(10, 1000), show=lambda n, r: n > r.stop):
+  (r,_,_) = channelHistogram(img)[0:3]
+  if r[0xFF] > 0:
+    n_marks = count(filter(lambda it: it[0:3] == (0xFF,0,0), imagePixels(img)))
+    if n_marks not in mark_range: return
+    if show(n_marks, mark_range): img.show(title = f"Removed {path}")
+    print(f"Removing {path} (redmarks {n_marks})")
     os.remove(path)
 
 onAreaWrote = eval("lambda path, img: " + (os.environ.get("ON_AREA_WROTE") or "defaultOnAreaWrote(path, img)"))
