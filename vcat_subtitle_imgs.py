@@ -12,7 +12,7 @@ def imagePixels(img):
     for x in range(0, img.width):
       yield img.getpixel((x, y))
 
-def channelHistogram(img):
+def channelHistogram(img) -> Tuple:
   n_channels = Pillow.getmodebands(img.mode)
   hist = img.histogram()
   return tuple(hist[i:i+256] for i in range(0, n_channels*256, 256))
@@ -41,6 +41,7 @@ def saveCropImages(img: Image, areas: Dict[str,LTRD]):
     area.save(k)
     onAreaWrote(k, area)
 
+
 from re import findall
 from json import dump, load
 def main(args):
@@ -60,11 +61,12 @@ def main(args):
     img.save(dst); dump(areas, open(f"{dst}.json", "w+"))
 
 import os
-def defaultOnAreaWrote(path, img, mark_range=range(10, 1000), show=lambda n, r: n > r.stop):
+def defaultOnAreaWrote(path, img, mark_range=range(20, 1000), show=lambda n, r: n > r.stop):
   (r,_,_) = channelHistogram(img)[0:3]
   if r[0xFF] > 0:
     n_marks = count(filter(lambda it: it[0:3] == (0xFF,0,0), imagePixels(img)))
     if n_marks not in mark_range: return
+
     if show(n_marks, mark_range): img.show(title = f"Removed {path}")
     print(f"Removing {path} (redmarks {n_marks})")
     os.remove(path)
