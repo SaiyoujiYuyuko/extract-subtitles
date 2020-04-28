@@ -9,6 +9,11 @@ from libs.fun_utils import zipWithNext
 from libs.cv_utils import stringSimilarity
 from libs.lrc import makeConvertorFps2Ms, dumpsLrc, millis2HourMinSecMs, time_just
 
+from os import environ
+def env(name, transform, default): return default if name not in environ else transform(environ[name])
+
+pipeSubtitle = env("PIPE", lambda code: eval(f"lambda it: {code}"), lambda it: it)
+
 class Record:
   ''' Value record on the time line '''
   def __init__(self, start: int, end: int, value):
@@ -40,16 +45,18 @@ def openTimeline(path):
 def mergeDebug(path):
   for (a, b) in zipWithNext(openTimeline(path)):
     ta, sa = a; tb, sb = b
-    v = stringSimilarity(sa, sb)
-    print(f"{ta}-{tb} {str(v)[0:4].ljust(4, '0')} {sa} | {sb}")
+    sa1, sb1 = map(pipeSubtitle, (sa, sb))
+    v = stringSimilarity(sa1, sb1)
+    print(f"{ta}-{tb} {str(v)[0:4].ljust(4, '0')} {sa1} | {sb1}")
 
 def merge(path, strsim_bound_max, consume = print):
   bound_max = float(strsim_bound_max)
-  (last_text, start, end) = ("", 0, 0)
+  (last_text, start, end) = (pipeSubtitle(""), 0, 0)
   onConsume = lambda: consume(Record(start, end, last_text))
   for (time, text) in openTimeline(path):
-    if stringSimilarity(last_text, text) < bound_max:
-      last_text = text
+    text1 = pipeSubtitle(text)
+    if stringSimilarity(last_text, text1) < bound_max:
+      last_text = text1
       end = time #< renew end
     else:
       onConsume()
